@@ -128,8 +128,9 @@ either can be used without the other:
    network and browsers upload straight to the presigned URL they are handed, the
    endpoint is published through the platform Envoy Gateway as a reverse proxy. The
    proxy objects are owned by the RAG layer (`ext/enterprise.ai-erag`, role `app_edp`);
-   the dedicated gateway listener that makes SigV4 signatures survive the hop is owned
-   by `roles/envoy_gateway`.
+   the dedicated gateway listener (`https-s3`) that makes SigV4 signatures survive the
+   hop is owned by `roles/gateway_envoy`, and `app_edp` attaches to it through
+   `roles/gateway_publish` (`gateway_publish_attach: s3`; `apex` in path routing mode).
 
 Capability 1 with the in-cluster object store is a complete, supported deployment
 ([Flow A](#flow-a-array-backed-persistent-volumes)). Add capability 2 only if you want

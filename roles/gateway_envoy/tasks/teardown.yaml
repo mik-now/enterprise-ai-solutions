@@ -1,0 +1,160 @@
+# Copyright (C) 2024-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+---
+# =============================================================================
+# gateway_envoy | teardown
+# =============================================================================
+# Removes what install created, and nothing else: Gateway API CRDs only when our
+# field manager wrote them (never OpenShift's, never another tool's). Solutions
+# remove their own publications (gateway_publish) before this runs. A missing
+# kind (CRD already gone) is not an error; anything else is.
+# =============================================================================
+
+- name: "gateway_envoy | teardown | Read the controller release"
+  kubernetes.core.helm_info:
+    name: "{{ gateway_envoy_helm_release }}"
+    release_namespace: "{{ gateway_envoy_namespace }}"
+  register: _gateway_envoy_release
+
+- name: "gateway_envoy | teardown | Nothing installed"
+  ansible.builtin.debug:
+    msg: "No {{ gateway_envoy_helm_release }} release in {{ gateway_envoy_namespace }}; nothing to tear down."
+  when: _gateway_envoy_release.status is not defined
+
+- name: "gateway_envoy | teardown | Remove the platform"
+  when: _gateway_envoy_release.status is defined
+  block:
+    - name: "gateway_envoy | teardown | Delete the Gateway, its routes, policies and TLS objects"
+      kubernetes.core.k8s:
+        state: absent
+        api_version: "{{ item.api }}"
+        kind: "{{ item.kind }}"
+        name: "{{ item.name }}"
+        namespace: "{{ item.namespace | default(omit) }}"
+        wait: "{{ item.kind == 'Gateway' }}"
+      vars:
+        _gw_ns: "{{ gateway_namespace }}"
+        _cm_ns: "{{ certmanager_namespace | default('cert-manager') }}"   # Foreign: owned by cert_manager
+      loop:
+        - {api: gateway.envoyproxy.io/v1alpha1, kind: SecurityPolicy, name: gateway-auth, namespace: "{{ _gw_ns }}"}
+        - api: gateway.envoyproxy.io/v1alpha1
+          kind: SecurityPolicy
+          name: http-to-https-redirect-no-auth
+          namespace: "{{ _gw_ns }}"
+        - api: gateway.envoyproxy.io/v1alpha1
+          kind: BackendTrafficPolicy
+          name: gateway-default-timeout
+          namespace: "{{ _gw_ns }}"
+        - api: gateway.envoyproxy.io/v1alpha1
+          kind: ClientTrafficPolicy
+          name: "{{ gateway_name }}-s3-path"
+          namespace: "{{ _gw_ns }}"
+        - {api: gateway.networking.k8s.io/v1, kind: HTTPRoute, name: http-to-https-redirect, namespace: "{{ _gw_ns }}"}
+        - {api: gateway.networking.k8s.io/v1, kind: Gateway, name: "{{ gateway_name }}", namespace: "{{ _gw_ns }}"}
+        - {api: gateway.networking.k8s.io/v1, kind: GatewayClass, name: "{{ gateway_envoy_class_name }}"}
+        - api: gateway.envoyproxy.io/v1alpha1
+          kind: EnvoyProxy
+          name: "{{ gateway_envoy_proxy_config_name }}"
+          namespace: "{{ gateway_envoy_namespace }}"
+        - api: admissionregistration.k8s.io/v1
+          kind: ValidatingAdmissionPolicyBinding
+          name: gateway-listenerset-host-grant
+        - {api: admissionregistration.k8s.io/v1, kind: ValidatingAdmissionPolicy, name: gateway-listenerset-host-grant}
+        - api: cert-manager.io/v1
+          kind: Certificate
+          name: "{{ gateway_tls_secret_name }}-cert"
+          namespace: "{{ _gw_ns }}"
+        - api: cert-manager.io/v1
+          kind: Certificate
+          name: "{{ gateway_s3_tls_secret_name }}-cert"
+          namespace: "{{ _gw_ns }}"
+        - {api: v1, kind: Secret, name: "{{ gateway_tls_secret_name }}", namespace: "{{ _gw_ns }}"}
+        - {api: v1, kind: Secret, name: "{{ gateway_s3_tls_secret_name }}", namespace: "{{ _gw_ns }}"}
+        - {api: cert-manager.io/v1, kind: ClusterIssuer, name: "{{ gateway_ca_issuer_name }}"}
+        - {api: cert-manager.io/v1, kind: ClusterIssuer, name: "{{ gateway_ca_bootstrap_issuer_name }}"}
+        - {api: cert-manager.io/v1, kind: Certificate, name: "{{ gateway_ca_cert_name }}", namespace: "{{ _cm_ns }}"}
+        - {api: v1, kind: Secret, name: "{{ gateway_ca_secret_name }}", namespace: "{{ _cm_ns }}"}
+      loop_control:
+        label: "{{ item.kind }}/{{ item.name }}"
+      register: _gateway_envoy_deleted
+      failed_when: >-
+        _gateway_envoy_deleted is failed
+        and 'Failed to find exact match' not in (_gateway_envoy_deleted.msg | default(''))
+
+    - name: "gateway_envoy | teardown | Remove the exported root CA"
+      ansible.builtin.file:
+        path: "{{ gateway_ca_export_path }}"
+        state: absent
+
+    - name: "gateway_envoy | teardown | Uninstall the controller"
+      kubernetes.core.helm:
+        name: "{{ gateway_envoy_helm_release }}"
+        release_namespace: "{{ gateway_envoy_namespace }}"
+        state: absent
+        wait: "{{ helm_wait }}"
+        timeout: "{{ helm_timeout }}"
+
+    - name: "gateway_envoy | teardown | Read CRDs and the OpenShift CRD policy"
+      kubernetes.core.k8s_info:
+        api_version: "{{ item.api }}"
+        kind: "{{ item.kind }}"
+        name: "{{ item.name | default(omit) }}"
+      loop:
+        - {api: apiextensions.k8s.io/v1, kind: CustomResourceDefinition}
+        - api: admissionregistration.k8s.io/v1
+          kind: ValidatingAdmissionPolicy
+          name: "{{ __gateway_envoy_openshift_crd_policy }}"
+      loop_control:
+        label: "{{ item.kind }}"
+      register: _gateway_envoy_td_read
+
+    # Envoy Gateway CRDs are always this role's; Gateway API CRDs only if our
+    # field manager wrote them, and the safe-upgrades policy came with them.
+    - name: "gateway_envoy | teardown | Delete the CRDs this role owns"
+      vars:
+        _crds: "{{ _gateway_envoy_td_read.results[0].resources | default([]) }}"
+        _openshift: "{{ _gateway_envoy_td_read.results[1].resources | default([]) | length > 0 }}"
+        _gwapi: "{{ _crds | selectattr('spec.group', 'in', __gateway_envoy_gwapi_groups) | list }}"
+        _gwapi_ours: >-
+          {{ not _openshift | bool and gateway_envoy_field_manager in
+             (_gwapi | map(attribute='metadata.managedFields', default=[]) | flatten
+              | map(attribute='manager') | list) }}
+      kubernetes.core.k8s:
+        state: absent
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        name: "{{ item }}"
+      loop: >-
+        {{ (_crds | selectattr('spec.group', 'eq', 'gateway.envoyproxy.io') | map(attribute='metadata.name') | list)
+           + (_gwapi | map(attribute='metadata.name') | list if _gwapi_ours | bool else []) }}
+
+    - name: "gateway_envoy | teardown | Delete the Gateway API safe-upgrades policy"
+      kubernetes.core.k8s:
+        state: absent
+        api_version: admissionregistration.k8s.io/v1
+        kind: "{{ item }}"
+        name: safe-upgrades.gateway.networking.k8s.io
+      loop: [ValidatingAdmissionPolicyBinding, ValidatingAdmissionPolicy]
+      when: >-
+        _gateway_envoy_td_read.results[1].resources | default([]) | length == 0
+        and (_gateway_envoy_td_read.results[0].resources | default([])
+             | selectattr('spec.group', 'eq', 'gateway.networking.k8s.io')
+             | map(attribute='metadata.managedFields', default=[]) | flatten | map(attribute='manager')
+             | select('eq', gateway_envoy_field_manager) | list | length > 0)
+
+    - name: "gateway_envoy | teardown | Delete the certgen ClusterRole and binding"
+      kubernetes.core.k8s:
+        state: absent
+        api_version: rbac.authorization.k8s.io/v1
+        kind: "{{ item }}"
+        name: "envoy-gateway-gateway-helm-certgen:{{ gateway_envoy_namespace }}"
+      loop: [ClusterRoleBinding, ClusterRole]
+
+    - name: "gateway_envoy | teardown | Delete the namespaces"
+      kubernetes.core.k8s:
+        state: absent
+        kind: Namespace
+        name: "{{ item }}"
+        wait: true
+        wait_timeout: 300
+      loop: "{{ [gateway_envoy_namespace, gateway_namespace] | unique }}"

@@ -1,0 +1,142 @@
+# Copyright (C) 2024-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+---
+# =============================================================================
+# gateway_envoy | proxy settings, GatewayClass and the platform Gateway
+# =============================================================================
+# The Gateway is applied server-side with gateway_envoy_field_manager and owns
+# only the platform listeners (http, https-apex, https-s3). Listeners that
+# gateway_publish adds in listener mode belong to their own field managers, so
+# a re-run of this role never removes them. Listeners of earlier releases
+# (the '*.<base>' wildcard) are removed by name.
+# =============================================================================
+
+# Data plane: a DaemonSet on control-plane nodes. MetalLB's L2 speaker answers
+# for the VIP from one elected control-plane node, so every such node runs an
+# Envoy. nodeSelector keys on the control-plane label (operators may remove the
+# taint); the toleration covers clusters that keep it.
+- name: "gateway_envoy | install | gateway | Create the EnvoyProxy configuration"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: gateway.envoyproxy.io/v1alpha1
+      kind: EnvoyProxy
+      metadata:
+        name: "{{ gateway_envoy_proxy_config_name }}"
+        namespace: "{{ gateway_envoy_namespace }}"
+      spec:
+        provider:
+          type: Kubernetes
+          kubernetes:
+            envoyDaemonSet:
+              pod:
+                nodeSelector:
+                  node-role.kubernetes.io/control-plane: ""
+                tolerations:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: Exists
+                    effect: NoSchedule
+
+- name: "gateway_envoy | install | gateway | Create the GatewayClass"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: gateway.networking.k8s.io/v1
+      kind: GatewayClass
+      metadata:
+        name: "{{ gateway_envoy_class_name }}"
+        labels: "{{ ownership_labels | default({}) }}"
+      spec:
+        controllerName: gateway.envoyproxy.io/gatewayclass-controller
+        parametersRef:
+          group: gateway.envoyproxy.io
+          kind: EnvoyProxy
+          name: "{{ gateway_envoy_proxy_config_name }}"
+          namespace: "{{ gateway_envoy_namespace }}"
+
+- name: "gateway_envoy | install | gateway | Apply the platform Gateway (server-side)"
+  kubernetes.core.k8s:
+    state: present
+    apply: true
+    server_side_apply:
+      field_manager: "{{ gateway_envoy_field_manager }}"
+      force_conflicts: true
+    definition: "{{ lookup('ansible.builtin.template', 'gateway.yaml.j2') | from_yaml }}"
+
+- name: "gateway_envoy | install | gateway | Read the Gateway"
+  kubernetes.core.k8s_info:
+    api_version: gateway.networking.k8s.io/v1
+    kind: Gateway
+    name: "{{ gateway_name }}"
+    namespace: "{{ gateway_namespace }}"
+  register: _gateway_envoy_gw
+
+# Fields written before server-side apply belong to another manager, so the
+# apply above cannot drop them. Remove legacy listeners by name; the test op
+# makes the patch fail instead of deleting the wrong entry if the list moved.
+- name: "gateway_envoy | install | gateway | Remove listeners of earlier releases"
+  kubernetes.core.k8s_json_patch:
+    api_version: gateway.networking.k8s.io/v1
+    kind: Gateway
+    name: "{{ gateway_name }}"
+    namespace: "{{ gateway_namespace }}"
+    patch:
+      - {op: test, path: "/spec/listeners/{{ item.0 }}/name", value: "{{ item.1 }}"}
+      - {op: remove, path: "/spec/listeners/{{ item.0 }}"}
+  # (index, name) pairs, last first, so each removal leaves the earlier indexes valid.
+  loop: >-
+    {{ range(_gateway_envoy_listeners | length) | zip(_gateway_envoy_listeners | map(attribute='name'))
+       | selectattr('1', 'in', __gateway_envoy_legacy_listeners) | list | reverse | list }}
+  vars:
+    _gateway_envoy_listeners: "{{ _gateway_envoy_gw.resources[0].spec.listeners }}"
+  loop_control:
+    label: "{{ item.1 }}"
+
+- name: "gateway_envoy | install | gateway | Wait for the Gateway to be accepted"
+  kubernetes.core.k8s_info:
+    api_version: gateway.networking.k8s.io/v1
+    kind: Gateway
+    name: "{{ gateway_name }}"
+    namespace: "{{ gateway_namespace }}"
+  register: _gateway_envoy_gw_status
+  until:
+    - _gateway_envoy_gw_status.resources | length > 0
+    - _gateway_envoy_gw_status.resources[0].status.conditions | default([])
+      | selectattr('type', 'eq', 'Accepted') | selectattr('status', 'eq', 'True') | list | length > 0
+  retries: 60
+  delay: 5
+
+# ── Plaintext :80 → HTTPS ─────────────────────────────────────────────────────
+# The http listener admits only this namespace, and this catch-all route
+# (no hostname) 301-redirects everything, so nothing is served in cleartext.
+- name: "gateway_envoy | install | gateway | Redirect plaintext HTTP to HTTPS"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: gateway.networking.k8s.io/v1
+      kind: HTTPRoute
+      metadata:
+        name: http-to-https-redirect
+        namespace: "{{ gateway_namespace }}"
+      spec:
+        parentRefs:
+          - {name: "{{ gateway_name }}", namespace: "{{ gateway_namespace }}", sectionName: http}
+        rules:
+          - matches: [{path: {type: PathPrefix, value: /}}]
+            filters:
+              - type: RequestRedirect
+                requestRedirect: {scheme: https, statusCode: 301}
+
+# A redirect carries no credentials; without this the gateway auth answers 401.
+- name: "gateway_envoy | install | gateway | Exempt the redirect from gateway auth"
+  kubernetes.core.k8s:
+    state: "{{ 'present' if auth_provider | default('none') in ['keycloak', 'litellm'] else 'absent' }}"
+    definition:
+      apiVersion: gateway.envoyproxy.io/v1alpha1
+      kind: SecurityPolicy
+      metadata:
+        name: http-to-https-redirect-no-auth
+        namespace: "{{ gateway_namespace }}"
+      spec:
+        targetRefs:
+          - {group: gateway.networking.k8s.io, kind: HTTPRoute, name: http-to-https-redirect}

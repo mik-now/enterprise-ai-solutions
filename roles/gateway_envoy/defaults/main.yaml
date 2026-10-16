@@ -1,0 +1,31 @@
+# Copyright (C) 2024-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+---
+# =============================================================================
+# gateway_envoy | defaults
+# =============================================================================
+# Envoy Gateway backend of the gateway domain (reached only through roles/gateway).
+# Every install converges the cluster to the versions below: it installs, or
+# upgrades an older release of its own; it never downgrades and never writes
+# Gateway API CRDs that another manager owns (e.g. OpenShift's Ingress Operator).
+# Domain-wide inputs (gateway_*) come from roles/gateway/defaults.
+# =============================================================================
+
+# ── Version / source ──────────────────────────────────────────────────────────
+gateway_envoy_version: "1.9.2"
+# Gateway API bundle shipped with gateway_envoy_version (standard channel).
+gateway_envoy_gateway_api_version: "1.6.1"
+gateway_envoy_helm_repo: "oci://docker.io/envoyproxy/gateway-helm"
+gateway_envoy_crds_helm_repo: "oci://docker.io/envoyproxy/gateway-crds-helm"
+gateway_envoy_helm_release: "envoy-gateway"
+
+# ── Placement ─────────────────────────────────────────────────────────────────
+gateway_envoy_namespace: "envoy-gateway-system"
+gateway_envoy_class_name: "eg"
+gateway_envoy_proxy_config_name: "eg-proxy-config"
+
+# ── Behaviour ─────────────────────────────────────────────────────────────────
+# Server-side apply owner of the CRDs and of the platform's part of the Gateway.
+gateway_envoy_field_manager: "gateway-envoy"
+# Oldest controller that serves ListenerSet v1 (Gateway API >= v1.5).
+gateway_envoy_listenerset_min_version: "1.8.0"

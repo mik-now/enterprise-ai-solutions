@@ -198,53 +198,24 @@
 
 # ── HTTPRoute (expose via gateway) — runs even on re-install ──────────────────
 
-- name: "keycloak | Create HTTPRoute for gateway"
-  kubernetes.core.k8s:
-    state: present
-    definition:
-      apiVersion: gateway.networking.k8s.io/v1
-      kind: HTTPRoute
-      metadata:
-        name: keycloak
-        namespace: "{{ keycloak_namespace }}"
-      spec:
-        parentRefs:
-          # Pin to the HTTPS listener only. Without sectionName an HTTPRoute
-          # attaches to every compatible listener, including the plaintext
-          # HTTP:80 one, which would serve OIDC tokens in cleartext.
-          - name: "{{ gateway_name | default('eg-gateway') }}"
-            namespace: "{{ gateway_namespace | default('envoy-gateway-system') }}"
-            sectionName: https
-        hostnames:
-          - "{{ keycloak_hostname }}"
-        rules:
-          - filters:
-              # HSTS: tell compliant browsers to only ever reach this host over
-              # HTTPS, so a later plaintext attempt is refused client-side before
-              # any credential leaves the browser. Only honored when received over
-              # HTTPS, hence set here on the :443 route, not the :80 redirect.
-              - type: ResponseHeaderModifier
-                responseHeaderModifier:
-                  set:
-                    - name: Strict-Transport-Security
-                      value: "max-age=31536000; includeSubDomains"
-            backendRefs:
-              - name: keycloak-service
-                port: 8080
-  when: gateway_create | default(false)
-
-- name: "keycloak | Exclude Keycloak route from gateway JWT policy"
-  kubernetes.core.k8s:
-    state: present
-    definition:
-      apiVersion: gateway.envoyproxy.io/v1alpha1
-      kind: SecurityPolicy
-      metadata:
-        name: keycloak-no-auth
-        namespace: "{{ keycloak_namespace }}"
-      spec:
-        targetRefs:
-          - group: gateway.networking.k8s.io
-            kind: HTTPRoute
-            name: keycloak
-  when: gateway_create | default(false)
+# Keycloak's own host (listener or ListenerSet) on the platform Gateway; Keycloak
+# authenticates its users itself, so the Gateway's JWT policy does not apply.
+- name: "keycloak | install | Publish Keycloak on the gateway"
+  ansible.builtin.include_role:
+    name: gateway_publish
+  vars:
+    gateway_publish_name: keycloak
+    gateway_publish_namespace: "{{ keycloak_namespace }}"
+    gateway_publish_hostname: "{{ keycloak_hostname }}"
+    gateway_publish_auth: none
+    gateway_publish_rules:
+      - filters:
+          # HSTS: compliant browsers then refuse a later plaintext attempt before
+          # any credential leaves the browser; honoured only over HTTPS.
+          - type: ResponseHeaderModifier
+            responseHeaderModifier:
+              set:
+                - {name: Strict-Transport-Security, value: "max-age=31536000; includeSubDomains"}
+        backendRefs:
+          - {name: keycloak-service, port: 8080}
+  when: gateway_create | bool

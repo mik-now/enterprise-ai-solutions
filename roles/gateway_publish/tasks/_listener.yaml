@@ -1,0 +1,93 @@
+# Copyright (C) 2024-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+---
+# =============================================================================
+# gateway_publish | listener mode (Gateway API < v1.5, e.g. OpenShift <= 4.22)
+# =============================================================================
+# One HTTPS listener for the host on the platform Gateway itself, applied
+# server-side with a field manager of its own: Gateway listeners are a list
+# keyed by name, so this publication owns exactly its entry and neither the
+# platform nor other publications can drop it. The listener admits routes from
+# the owner namespace only (kubernetes.io/metadata.name selector), which is the
+# same isolation a ListenerSet's 'from: Same' gives. The certificate lives in
+# the gateway namespace, so the Gateway references no other namespace.
+# =============================================================================
+
+- name: "gateway_publish | publish | listener | Issue the certificate"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: cert-manager.io/v1
+      kind: Certificate
+      metadata:
+        name: "{{ _gateway_publish_secret }}"
+        namespace: "{{ _gateway_publish_gw_namespace }}"
+        labels: "{{ ownership_labels | default({}) }}"
+      spec:
+        secretName: "{{ _gateway_publish_secret }}"
+        issuerRef: {name: "{{ _gateway_publish_issuer }}", kind: ClusterIssuer}
+        dnsNames: ["{{ gateway_publish_hostname }}"]
+  when: _gateway_publish_tls_mode == 'selfsigned'
+
+- name: "gateway_publish | publish | listener | Wait for the certificate"
+  kubernetes.core.k8s_info:
+    api_version: cert-manager.io/v1
+    kind: Certificate
+    name: "{{ _gateway_publish_secret }}"
+    namespace: "{{ _gateway_publish_gw_namespace }}"
+  register: _gateway_publish_cert
+  until: >-
+    _gateway_publish_cert.resources | default([]) | length > 0 and
+    _gateway_publish_cert.resources[0].status.conditions | default([])
+      | selectattr('type', 'eq', 'Ready') | selectattr('status', 'eq', 'True') | list | length > 0
+  retries: "{{ gateway_publish_wait_retries }}"
+  delay: 5
+  when: _gateway_publish_tls_mode == 'selfsigned'
+
+- name: "gateway_publish | publish | listener | Add the listener to the Gateway (server-side)"
+  kubernetes.core.k8s:
+    state: present
+    apply: true
+    server_side_apply:
+      field_manager: "{{ _gateway_publish_field_manager }}"
+      force_conflicts: false
+    definition:
+      apiVersion: gateway.networking.k8s.io/v1
+      kind: Gateway
+      metadata:
+        name: "{{ _gateway_publish_gw_name }}"
+        namespace: "{{ _gateway_publish_gw_namespace }}"
+      spec:
+        listeners:
+          - name: "{{ _gateway_publish_listener }}"
+            hostname: "{{ gateway_publish_hostname }}"
+            port: 443
+            protocol: HTTPS
+            tls:
+              mode: Terminate
+              certificateRefs:
+                - kind: Secret
+                  name: >-
+                    {{ _gateway_publish_secret if _gateway_publish_tls_mode == 'selfsigned'
+                       else _gateway_publish_tls_secret }}
+            allowedRoutes:
+              namespaces:
+                from: Selector
+                selector:
+                  matchLabels:
+                    kubernetes.io/metadata.name: "{{ gateway_publish_namespace }}"
+
+- name: "gateway_publish | publish | listener | Wait for the listener to be programmed"
+  kubernetes.core.k8s_info:
+    api_version: gateway.networking.k8s.io/v1
+    kind: Gateway
+    name: "{{ _gateway_publish_gw_name }}"
+    namespace: "{{ _gateway_publish_gw_namespace }}"
+  register: _gateway_publish_gw_after
+  until: >-
+    (_gateway_publish_gw_after.resources[0].status.listeners | default([])
+     | selectattr('name', 'eq', _gateway_publish_listener) | map(attribute='conditions') | flatten
+     | selectattr('type', 'eq', 'Programmed') | selectattr('status', 'eq', 'True') | list | length) > 0
+  retries: "{{ gateway_publish_wait_retries }}"
+  delay: 5
+  when: gateway_publish_wait | bool

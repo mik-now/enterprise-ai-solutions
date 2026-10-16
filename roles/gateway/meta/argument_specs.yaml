@@ -1,0 +1,24 @@
+# Copyright (C) 2024-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+---
+argument_specs:
+  main:
+    short_description: Install, tear down or validate the platform Gateway through its backend
+    options:
+      gateway_backend:
+        type: str
+        default: envoy
+        description: Backend selector, a name from gateway_backends.
+      gateway_tls_mode:
+        type: str
+        choices: [selfsigned, custom]
+        default: selfsigned
+        description: Who issues the listener certificates.
+      gateway_name:
+        type: str
+        default: eg-gateway
+        description: Name of the platform Gateway.
+      gateway_namespace:
+        type: str
+        default: envoy-gateway-system
+        description: Namespace of the platform Gateway.

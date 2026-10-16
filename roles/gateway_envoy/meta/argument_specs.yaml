@@ -1,0 +1,23 @@
+# Copyright (C) 2024-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+---
+argument_specs:
+  main:
+    short_description: Envoy Gateway backend (run through roles/gateway)
+    options:
+      gateway_envoy_version:
+        type: str
+        default: "1.9.2"
+        description: Envoy Gateway release the install converges to (never downgrades).
+      gateway_envoy_gateway_api_version:
+        type: str
+        default: "1.6.1"
+        description: Gateway API bundle shipped with gateway_envoy_version.
+      gateway_envoy_namespace:
+        type: str
+        default: envoy-gateway-system
+        description: Namespace of the controller and its proxies.
+      gateway_envoy_listenerset_min_version:
+        type: str
+        default: "1.8.0"
+        description: Oldest controller that serves ListenerSet v1.

@@ -1,0 +1,47 @@
+# Copyright (C) 2024-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+---
+# =============================================================================
+# gateway_envoy | install
+# =============================================================================
+# Idempotent and convergent: a second run changes nothing, and a run on an
+# older platform brings controller, CRDs, Gateway and policies to this release.
+# Publishes gateway_attach_mode (listenerset | listener) for gateway_publish.
+# =============================================================================
+
+- name: "gateway_envoy | install | Detect the installed controller and CRDs"
+  ansible.builtin.include_tasks: _detect.yaml
+
+- name: "gateway_envoy | install | CRDs"
+  ansible.builtin.include_tasks: _crds.yaml
+  when: _gateway_envoy_action != 'keep' or _gateway_envoy_installed_version == gateway_envoy_version
+
+- name: "gateway_envoy | install | Controller"
+  ansible.builtin.include_tasks: _controller.yaml
+
+- name: "gateway_envoy | install | Platform listener hosts"
+  ansible.builtin.set_fact:
+    _gateway_envoy_leaves: >-
+      {{ [{'host': base_domain_name, 'secret': gateway_tls_secret_name}]
+         + ([{'host': gateway_s3_hostname, 'secret': gateway_s3_tls_secret_name}]
+            if gateway_s3_listener_enabled | bool else []) }}
+
+- name: "gateway_envoy | install | Platform Gateway"
+  when: gateway_create | bool
+  block:
+    - name: "gateway_envoy | install | TLS"
+      ansible.builtin.include_tasks: _tls.yaml
+
+    - name: "gateway_envoy | install | Gateway"
+      ansible.builtin.include_tasks: _gateway.yaml
+
+    - name: "gateway_envoy | install | Policies"
+      ansible.builtin.include_tasks: _policies.yaml
+
+- name: "gateway_envoy | install | Summary"
+  ansible.builtin.debug:
+    msg: >-
+      Envoy Gateway {{ _gateway_envoy_version_after }} in {{ gateway_envoy_namespace }};
+      {{ ('Gateway ' ~ gateway_namespace ~ '/' ~ gateway_name ~ ' (TLS ' ~ gateway_tls_mode ~ ', auth '
+          ~ auth_provider | default('none') ~ '); solutions publish via ' ~ gateway_attach_mode ~ 's')
+         if gateway_create | bool else 'no platform Gateway (gateway_create: false)' }}.

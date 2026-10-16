@@ -1,0 +1,28 @@
+# Copyright (C) 2024-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+---
+# =============================================================================
+# gateway_publish | route auth on the Envoy Gateway backend
+# =============================================================================
+# A route-level SecurityPolicy overrides the Gateway-wide one; an empty one
+# means no gateway authentication (the service checks credentials itself).
+# =============================================================================
+
+- name: "gateway_publish | route auth | Gateway auth exemption: {{ gateway_publish_auth }}"
+  kubernetes.core.k8s:
+    state: "{{ 'present' if gateway_publish_action == 'publish' and gateway_publish_auth == 'none' else 'absent' }}"
+    definition:
+      apiVersion: gateway.envoyproxy.io/v1alpha1
+      kind: SecurityPolicy
+      metadata:
+        name: "{{ _gateway_publish_route }}-no-auth"
+        namespace: "{{ gateway_publish_namespace }}"
+      spec:
+        targetRefs:
+          - {group: gateway.networking.k8s.io, kind: HTTPRoute, name: "{{ _gateway_publish_route }}"}
+  register: _gateway_publish_policy
+  # Removing tolerates a cluster without the Envoy Gateway API.
+  failed_when: >-
+    _gateway_publish_policy is failed
+    and not (gateway_publish_action == 'unpublish'
+             and 'Failed to find exact match' in (_gateway_publish_policy.msg | default('')))

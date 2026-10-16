@@ -1,0 +1,43 @@
+# Copyright (C) 2024-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+---
+# =============================================================================
+# gateway_publish | the HTTPRoute
+# =============================================================================
+# One parentRef (the host's listener, or the apex / S3 platform listener), so a
+# route never binds the plaintext :80 listener.
+# =============================================================================
+
+- name: "gateway_publish | publish | route | Apply the HTTPRoute"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: gateway.networking.k8s.io/v1
+      kind: HTTPRoute
+      metadata:
+        name: "{{ _gateway_publish_route }}"
+        namespace: "{{ gateway_publish_namespace }}"
+      spec:
+        parentRefs: ["{{ _gateway_publish_parent }}"]
+        hostnames: "{{ _gateway_publish_hostnames }}"
+        rules: "{{ gateway_publish_rules }}"
+
+- name: "gateway_publish | publish | route | Wait for the route to be accepted"
+  kubernetes.core.k8s_info:
+    api_version: gateway.networking.k8s.io/v1
+    kind: HTTPRoute
+    name: "{{ _gateway_publish_route }}"
+    namespace: "{{ gateway_publish_namespace }}"
+  register: _gateway_publish_route_status
+  vars:
+    _conditions: >-
+      {{ (_gateway_publish_route_status.resources | default([{}]) | first).status.parents | default([])
+         | selectattr('parentRef.sectionName', 'defined')
+         | selectattr('parentRef.sectionName', 'eq', _gateway_publish_parent.sectionName)
+         | map(attribute='conditions') | flatten }}
+  until: >-
+    _conditions | selectattr('type', 'in', ['Accepted', 'ResolvedRefs']) | selectattr('status', 'eq', 'True')
+    | list | length == 2
+  retries: "{{ gateway_publish_wait_retries }}"
+  delay: 5
+  when: gateway_publish_wait | bool

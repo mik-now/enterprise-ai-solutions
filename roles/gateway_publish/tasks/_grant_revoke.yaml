@@ -1,0 +1,28 @@
+# Copyright (C) 2024-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+---
+# =============================================================================
+# gateway_publish | revoke the host grant (remove the mark only)
+# =============================================================================
+
+- name: "gateway_publish | unpublish | grant | Read the namespace"
+  kubernetes.core.k8s_info:
+    kind: Namespace
+    name: "{{ gateway_publish_namespace }}"
+  register: _gateway_publish_ns
+
+- name: "gateway_publish | unpublish | grant | Revoke {{ gateway_publish_hostname }}"
+  vars:
+    _left: >-
+      {{ (_gateway_publish_ns.resources[0].metadata.annotations | default({}))
+         .get(_gateway_publish_hosts_key, '').split(',')
+         | map('trim') | select | reject('eq', gateway_publish_hostname) | sort }}
+  kubernetes.core.k8s:
+    state: patched
+    kind: Namespace
+    name: "{{ gateway_publish_namespace }}"
+    definition:
+      metadata:
+        annotations: "{{ {_gateway_publish_hosts_key: (_left | join(',')) if _left else None} }}"
+        labels: "{{ {_gateway_publish_ls_label: 'true' if _left else None} }}"
+  when: _gateway_publish_ns.resources | default([]) | length > 0

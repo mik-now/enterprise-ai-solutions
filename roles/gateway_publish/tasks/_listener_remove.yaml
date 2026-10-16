@@ -1,0 +1,50 @@
+# Copyright (C) 2024-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+---
+# =============================================================================
+# gateway_publish | remove the listener-mode objects (if any)
+# =============================================================================
+# The listener is removed by name; the test op fails the patch rather than
+# delete another entry if the list changed in between.
+
+- name: "gateway_publish | remove | listener | Read the Gateway"
+  kubernetes.core.k8s_info:
+    api_version: gateway.networking.k8s.io/v1
+    kind: Gateway
+    name: "{{ _gateway_publish_gw_name }}"
+    namespace: "{{ _gateway_publish_gw_namespace }}"
+  register: _gateway_publish_gw_now
+  failed_when: >-
+    _gateway_publish_gw_now is failed
+    and 'Failed to find exact match' not in (_gateway_publish_gw_now.msg | default(''))
+
+- name: "gateway_publish | remove | listener | Remove the listener from the Gateway"
+  vars:
+    _listeners: "{{ (_gateway_publish_gw_now.resources | default([{}]) | first).spec.listeners | default([]) }}"
+    _index: "{{ (_listeners | map(attribute='name') | list).index(_gateway_publish_listener) }}"
+  kubernetes.core.k8s_json_patch:
+    api_version: gateway.networking.k8s.io/v1
+    kind: Gateway
+    name: "{{ _gateway_publish_gw_name }}"
+    namespace: "{{ _gateway_publish_gw_namespace }}"
+    patch:
+      - {op: test, path: "/spec/listeners/{{ _index }}/name", value: "{{ _gateway_publish_listener }}"}
+      - {op: remove, path: "/spec/listeners/{{ _index }}"}
+  when: _gateway_publish_listener in (_listeners | map(attribute='name') | list)
+
+- name: "gateway_publish | remove | listener | Delete the certificate"
+  kubernetes.core.k8s:
+    state: absent
+    api_version: "{{ item.api }}"
+    kind: "{{ item.kind }}"
+    name: "{{ gateway_publish_namespace }}-{{ gateway_publish_name }}-tls"
+    namespace: "{{ _gateway_publish_gw_namespace }}"
+  loop:
+    - {api: cert-manager.io/v1, kind: Certificate}
+    - {api: v1, kind: Secret}
+  loop_control:
+    label: "{{ item.kind }}"
+  register: _gateway_publish_cert_del
+  failed_when: >-
+    _gateway_publish_cert_del is failed
+    and 'Failed to find exact match' not in (_gateway_publish_cert_del.msg | default(''))

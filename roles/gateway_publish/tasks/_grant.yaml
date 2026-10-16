@@ -1,0 +1,50 @@
+# Copyright (C) 2024-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+---
+# =============================================================================
+# gateway_publish | grant the host to the namespace
+# =============================================================================
+# The grant is a mark on the solution namespace (annotation + label, keys owned
+# by the gateway role), not an ownership label: unpublish removes the mark only.
+# A host granted to another namespace is refused.
+# =============================================================================
+
+- name: "gateway_publish | publish | grant | Read host grants"
+  kubernetes.core.k8s_info:
+    kind: Namespace
+  register: _gateway_publish_namespaces
+
+- name: "gateway_publish | publish | grant | Refuse a host granted to another namespace"
+  vars:
+    _conflicts: >-
+      {%- set out = [] -%}
+      {%- for ns in _gateway_publish_namespaces.resources if ns.metadata.name != gateway_publish_namespace -%}
+      {%- set hosts = (ns.metadata.annotations | default({})).get(_gateway_publish_hosts_key, '')
+                      .split(',') | map('trim') | list -%}
+      {%- if gateway_publish_hostname in hosts -%}{%- set _ = out.append(ns.metadata.name) -%}{%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+  ansible.builtin.assert:
+    that: _conflicts | length == 0
+    fail_msg: >-
+      {{ gateway_publish_hostname }} is already granted to namespace {{ _conflicts | join(', ') }};
+      unpublish it there first.
+    quiet: true
+
+- name: "gateway_publish | publish | grant | Grant the host to {{ gateway_publish_namespace }}"
+  vars:
+    _annotations: >-
+      {{ (_gateway_publish_namespaces.resources | selectattr('metadata.name', 'eq', gateway_publish_namespace)
+          | first | default({})).metadata.annotations | default({}) }}
+    _hosts: >-
+      {{ ((_annotations.get(_gateway_publish_hosts_key, '').split(',') | map('trim') | select | list)
+          + [gateway_publish_hostname]) | unique | sort | join(',') }}
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ gateway_publish_namespace }}"
+        labels: "{{ {_gateway_publish_ls_label: 'true'} }}"
+        annotations: "{{ {_gateway_publish_hosts_key: _hosts} }}"

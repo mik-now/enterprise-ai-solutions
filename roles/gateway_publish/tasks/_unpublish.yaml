@@ -1,0 +1,36 @@
+# Copyright (C) 2024-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+---
+# =============================================================================
+# gateway_publish | unpublish (same inputs as publish)
+# =============================================================================
+# Removes the route, its policy and, for host attach, the host's listener in
+# both modes and the host grant. Tolerates a Gateway or CRDs that are gone.
+# =============================================================================
+
+- name: "gateway_publish | unpublish | Delete the route"
+  kubernetes.core.k8s:
+    state: absent
+    api_version: gateway.networking.k8s.io/v1
+    kind: HTTPRoute
+    name: "{{ _gateway_publish_route }}"
+    namespace: "{{ gateway_publish_namespace }}"
+  register: _gateway_publish_route_del
+  failed_when: >-
+    _gateway_publish_route_del is failed
+    and 'Failed to find exact match' not in (_gateway_publish_route_del.msg | default(''))
+
+- name: "gateway_publish | unpublish | Route auth"
+  ansible.builtin.include_tasks: "_policy_{{ _gateway_publish_backend }}.yaml"
+
+- name: "gateway_publish | unpublish | Host listener"
+  when: gateway_publish_attach == 'host'
+  block:
+    - name: "gateway_publish | unpublish | Remove the ListenerSet"
+      ansible.builtin.include_tasks: _listenerset_remove.yaml
+
+    - name: "gateway_publish | unpublish | Remove the Gateway listener"
+      ansible.builtin.include_tasks: _listener_remove.yaml
+
+    - name: "gateway_publish | unpublish | Revoke the host"
+      ansible.builtin.include_tasks: _grant_revoke.yaml

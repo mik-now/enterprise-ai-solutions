@@ -1,0 +1,12 @@
+# Copyright (C) 2024-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+---
+- name: "gateway_envoy | Assert supported action"
+  ansible.builtin.assert:
+    that: component_action in ['install', 'teardown', 'validate']
+    fail_msg: "gateway_envoy: unsupported component_action='{{ component_action | default('') }}'"
+    quiet: true
+
+- name: "gateway_envoy | Dispatch action: {{ component_action }}"
+  ansible.builtin.include_tasks: "{{ component_action }}.yaml"
+  tags: [gateway_envoy]

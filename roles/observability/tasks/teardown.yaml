@@ -48,14 +48,14 @@
 
     # ── Gateway route ─────────────────────────────────────────────────────────
 
-    - name: "observability | Delete Grafana HTTPRoute"
-      kubernetes.core.k8s:
-        api_version: gateway.networking.k8s.io/v1
-        kind: HTTPRoute
-        name: grafana
-        namespace: "{{ observability_namespace }}"
-        state: absent
-      failed_when: false
+    - name: "observability | teardown | Unpublish Grafana"
+      ansible.builtin.include_role:
+        name: gateway_publish
+      vars:
+        gateway_publish_action: unpublish
+        gateway_publish_name: grafana
+        gateway_publish_namespace: "{{ observability_namespace }}"
+        gateway_publish_hostname: "{{ observability_grafana_hostname }}"
 
     # ── OTel Collector ────────────────────────────────────────────────────────
 

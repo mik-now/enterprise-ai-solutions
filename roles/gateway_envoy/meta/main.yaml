@@ -1,0 +1,9 @@
+# Copyright (C) 2024-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+---
+galaxy_info:
+  author: Intel Corporation
+  description: Envoy Gateway backend of the gateway domain (controller, CRDs, platform Gateway, TLS)
+  license: Apache-2.0
+  min_ansible_version: "2.17"
+dependencies: []

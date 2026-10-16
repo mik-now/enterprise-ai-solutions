@@ -198,14 +198,14 @@ The gateway terminates all external HTTPS. There is no plaintext mode.
 
 | `gateway_tls_mode` | What happens |
 |---|---|
-| `selfsigned` (default) | cert-manager creates an internal root CA that signs a wildcard certificate for `*.<base_domain_name>`. The CA is exported to `env/<name>/logs/ai-solutions-ca.crt` after install — import it once to remove browser warnings. |
-| `custom` | You supply the certificate and key. |
+| `selfsigned` (default) | cert-manager creates an internal root CA (ClusterIssuer `gateway-issuer`) that signs one certificate per listener host — the apex `<base_domain_name>`, the S3 host (when its listener is on), and every host a solution publishes. There is no wildcard certificate. The CA is exported to `env/<name>/logs/ai-solutions-ca.crt` after install — import it once to remove browser warnings. |
+| `custom` | You supply the certificate and key; it serves every listener, so it must cover the apex and every published host. |
 
 **Custom TLS:**
 
 ```yaml
 gateway_tls_mode: "custom"
-gateway_tls_cert_file: "/path/to/cert.pem"   # must cover <base_domain> and *.<base_domain>
+gateway_tls_cert_file: "/path/to/cert.pem"   # must cover <base_domain> and every published host (e.g. *.<base_domain>)
 gateway_tls_key_file:  "/path/to/key.pem"
 ```
 
@@ -395,9 +395,11 @@ existing_kubernetes: "/absolute/path/to/kubeconfig"   # skips all Kubespray phas
 Component versions are set in `global_config.yaml` and can be overridden at runtime:
 
 ```bash
-./es_auto_installer.sh install envoy_gateway --env local \
-  -- -e envoy_gateway_version=1.4.0
+./es_auto_installer.sh install gateway --env local \
+  -- -e gateway_envoy_version=1.9.2
 ```
+
+Re-running `install gateway` on an existing cluster upgrades Envoy Gateway and the Gateway API CRDs in place; it never downgrades.
 
 Or edit `global_config.yaml` and re-run `install <component>`.
 

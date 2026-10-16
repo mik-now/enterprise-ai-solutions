@@ -1,0 +1,9 @@
+# Copyright (C) 2024-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+---
+galaxy_info:
+  author: Intel Corporation
+  description: Platform Gateway domain dispatcher (resolves and runs the gateway backend)
+  license: Apache-2.0
+  min_ansible_version: "2.17"
+dependencies: []

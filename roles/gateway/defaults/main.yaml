@@ -1,0 +1,63 @@
+# Copyright (C) 2024-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+---
+# =============================================================================
+# gateway | defaults
+# =============================================================================
+# Domain dispatcher for the platform Gateway (role_standards §8): resolves
+# gateway_backend to a backend role and runs it. The domain-wide inputs below
+# (gateway_*) are read by every backend and by the gateway_publish library role.
+# =============================================================================
+
+# ── Backend ───────────────────────────────────────────────────────────────────
+gateway_backend: "envoy"                  # selector; must be a name in gateway_backends
+# Registry - the ONLY place backends are listed. role: the backend role to run.
+gateway_backends:
+  - name: envoy
+    role: gateway_envoy
+    preflight: false
+
+# ── Gateway resource ──────────────────────────────────────────────────────────
+gateway_create: true                      # false: controller only, no platform Gateway
+gateway_name: "eg-gateway"
+gateway_namespace: "envoy-gateway-system"
+# Default request timeout for every route on the Gateway (Envoy's own default,
+# 15s, is too short for LLM responses). Routes can override per rule.
+gateway_request_timeout: "600s"
+
+# ── TLS ───────────────────────────────────────────────────────────────────────
+# HTTPS is mandatory. selfsigned: an internal root CA signs one leaf per
+# listener host; custom: the operator's certificate serves every listener.
+gateway_tls_mode: "selfsigned"            # selfsigned | custom
+gateway_tls_cert_file: ""                 # custom mode: PEM certificate (chain)
+gateway_tls_key_file: ""                  # custom mode: PEM private key
+gateway_tls_secret_name: "gateway-tls"    # apex listener (all listeners in custom mode)
+gateway_ca_bootstrap_issuer_name: "gateway-ca-bootstrap"
+gateway_ca_issuer_name: "gateway-issuer"  # ClusterIssuer that signs every listener leaf
+gateway_ca_cert_name: "ai-solutions-ca"
+gateway_ca_secret_name: "ai-solutions-ca"
+gateway_ca_common_name: "AI Solutions Root CA"
+gateway_ca_duration: "87600h"             # 10y root
+gateway_ca_renew_before: "720h"           # 30d
+gateway_ca_export_path: "{{ log_dir }}/{{ gateway_ca_cert_name }}.crt"
+
+# ── ONTAP S3 API listener ─────────────────────────────────────────────────────
+# S3 SigV4 signs the path verbatim, so the S3 API gets a listener of its own
+# whose path normalization is relaxed (merge_slashes and %2F rewriting off),
+# instead of weakening normalization for every other host. Only in subdomain
+# mode: in path mode the S3 API shares the apex host.
+gateway_s3_listener_name: "https-s3"
+gateway_s3_subdomain: "s3"
+gateway_s3_hostname: "{{ gateway_s3_subdomain ~ '.' ~ base_domain_name }}"
+gateway_s3_listener_enabled: >-
+  {{ (ontap_s3_data_lif | default('', true) | string | trim | length > 0)
+     and ((routing_mode | default('subdomain')) != 'path') }}
+gateway_s3_tls_secret_name: "gateway-s3-tls"
+
+# ── Host grants (read by gateway_publish) ─────────────────────────────────────
+# A solution namespace may publish a host only if the host is listed in this
+# namespace annotation (comma-separated). Namespaces are cluster-scoped, so
+# only cluster operators and the installer can grant hosts. In ListenerSet mode
+# the Gateway also admits ListenerSets only from namespaces with the label.
+gateway_hostnames_annotation: "gateway.enterprise-ai/hostnames"
+gateway_listenersets_label: "gateway.enterprise-ai/allow-listenersets"

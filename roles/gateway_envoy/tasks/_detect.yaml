@@ -1,0 +1,116 @@
+# Copyright (C) 2024-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+---
+# =============================================================================
+# gateway_envoy | detect what is installed (read-only)
+# =============================================================================
+# Decides what this install does, without changing anything:
+#   _gateway_envoy_action          install | upgrade | keep (controller)
+#   _gateway_envoy_gwapi_ours      the Gateway API CRDs are ours (or absent)
+#   _gateway_envoy_gwapi_apply     apply the bundled Gateway API CRDs
+#   gateway_attach_mode            listenerset | listener (published interface fact)
+# Ours: written by our field manager, or only by the managers of earlier
+# releases of this platform while our controller runs. Never ours: CRDs another
+# manager wrote, and any cluster with OpenShift's CRD admission policy.
+# =============================================================================
+
+- name: "gateway_envoy | detect | Read the controller release"
+  kubernetes.core.helm_info:
+    name: "{{ gateway_envoy_helm_release }}"
+    release_namespace: "{{ gateway_envoy_namespace }}"
+  register: _gateway_envoy_release
+
+- name: "gateway_envoy | detect | Find Envoy Gateway controllers"
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    label_selectors: ["{{ __gateway_envoy_controller_selector }}"]
+  register: _gateway_envoy_controllers
+
+- name: "gateway_envoy | detect | Read Gateway API CRDs"
+  kubernetes.core.k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+  register: _gateway_envoy_crds
+
+- name: "gateway_envoy | detect | Look for OpenShift's CRD admission policy"
+  kubernetes.core.k8s_info:
+    api_version: admissionregistration.k8s.io/v1
+    kind: ValidatingAdmissionPolicy
+    name: "{{ __gateway_envoy_openshift_crd_policy }}"
+  register: _gateway_envoy_ocp_policy
+
+- name: "gateway_envoy | detect | Decide"
+  vars:
+    _release: "{{ _gateway_envoy_release.status | default(none) }}"
+    _installed: >-
+      {{ (_release.chart | default('') | regex_search('[0-9]+\.[0-9]+\.[0-9]+')) | default('', true)
+         if _release is not none else '' }}
+    _foreign_controllers: >-
+      {{ _gateway_envoy_controllers.resources | default([])
+         | rejectattr('metadata.namespace', 'eq', gateway_envoy_namespace)
+         | map(attribute='metadata.namespace') | list }}
+    _gwapi: >-
+      {{ _gateway_envoy_crds.resources | default([])
+         | selectattr('spec.group', 'in', __gateway_envoy_gwapi_groups) | list }}
+    _gw_crd: >-
+      {{ _gwapi | selectattr('metadata.name', 'eq', 'gateways.gateway.networking.k8s.io') | first | default(none) }}
+    _ls_crd: >-
+      {{ _gwapi | selectattr('metadata.name', 'eq', 'listenersets.gateway.networking.k8s.io') | first | default(none) }}
+    _managers: >-
+      {{ _gwapi | map(attribute='metadata.managedFields', default=[]) | flatten
+         | map(attribute='manager') | unique | list }}
+    _bundle: >-
+      {{ ((_gw_crd.metadata.annotations | default({})).get('gateway.networking.k8s.io/bundle-version', '')
+          | regex_replace('^v', '')) if _gw_crd is not none else '' }}
+    _openshift: "{{ _gateway_envoy_ocp_policy.resources | default([]) | length > 0 }}"
+    _ours: >-
+      {{ not _openshift | bool and (
+           _gw_crd is none
+           or gateway_envoy_field_manager in _managers
+           or (_release is not none and (_managers | difference(__gateway_envoy_legacy_crd_managers) | length == 0))) }}
+    _action: >-
+      {{ 'install' if _release is none
+         else 'upgrade' if _installed and _installed is version(gateway_envoy_version, '<')
+         else 'keep' }}
+    _version_after: "{{ gateway_envoy_version if _action != 'keep' or not _installed else _installed }}"
+    # Never older than what is there: the safe-upgrades policy denies downgrades.
+    _apply: >-
+      {{ _ours | bool and (not _bundle or _bundle is version(gateway_envoy_gateway_api_version, '<=')) }}
+    _ls_served: >-
+      {{ (_apply | bool and gateway_envoy_gateway_api_version is version('1.5.0', '>='))
+         or (_ls_crd is not none
+             and _ls_crd.spec.versions | selectattr('name', 'eq', 'v1') | selectattr('served') | list | length > 0) }}
+  ansible.builtin.set_fact:
+    _gateway_envoy_action: "{{ _action }}"
+    _gateway_envoy_installed_version: "{{ _installed }}"
+    _gateway_envoy_version_after: "{{ _version_after }}"
+    _gateway_envoy_foreign_controllers: "{{ _foreign_controllers }}"
+    _gateway_envoy_gwapi_ours: "{{ _ours | bool }}"
+    _gateway_envoy_gwapi_apply: "{{ _apply | bool }}"
+    _gateway_envoy_gwapi_bundle: "{{ gateway_envoy_gateway_api_version if _apply | bool else _bundle }}"
+    _gateway_envoy_openshift: "{{ _openshift | bool }}"
+    gateway_attach_mode: >-
+      {{ 'listenerset' if _ls_served | bool and _version_after is version(gateway_envoy_listenerset_min_version, '>=')
+         else 'listener' }}
+
+- name: "gateway_envoy | detect | Refuse a second Envoy Gateway controller"
+  ansible.builtin.assert:
+    that: _gateway_envoy_foreign_controllers | length == 0
+    fail_msg: >-
+      Envoy Gateway controllers already run in {{ _gateway_envoy_foreign_controllers | join(', ') }}.
+      This platform installs its own in {{ gateway_envoy_namespace }}; two controllers serving the
+      same GatewayClass controllerName fight over every Gateway. Remove the other one, or set
+      gateway_envoy_namespace to its namespace if it is this platform's from an earlier run.
+    quiet: true
+
+- name: "gateway_envoy | detect | Result"
+  ansible.builtin.debug:
+    msg: >-
+      Envoy Gateway {{ _gateway_envoy_installed_version or '(none)' }} → {{ _gateway_envoy_version_after }}
+      ({{ _gateway_envoy_action }});
+      Gateway API {{ _gateway_envoy_gwapi_bundle or '(none)' }}
+      {{ '(ours, applied by this role)' if _gateway_envoy_gwapi_apply | bool
+         else '(owned by ' ~ ('OpenShift' if _gateway_envoy_openshift | bool else 'another manager') ~ ', left as is)'
+         if not _gateway_envoy_gwapi_ours | bool else '(ours, newer than bundled, left as is)' }};
+      services publish via {{ gateway_attach_mode }}s.

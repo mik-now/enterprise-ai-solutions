@@ -1,0 +1,91 @@
+# Copyright (C) 2024-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+---
+# =============================================================================
+# gateway_publish | context
+# =============================================================================
+# Validates the inputs, reads the platform values this role does not own, and
+# reads the live Gateway to choose the mode:
+#   listenerset  the Gateway sets spec.allowedListeners (Gateway API >= v1.5)
+#   listener     otherwise: one listener per host on the Gateway itself
+# The Gateway is the single source of truth, so this works the same from the
+# platform, from a solution repo run later, and on clusters whose Gateway API
+# CRDs another manager owns (OpenShift).
+# =============================================================================
+
+- name: "gateway_publish | context | Validate the inputs"
+  ansible.builtin.assert:
+    that:
+      - gateway_publish_name is match('^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$')
+      - gateway_publish_namespace | length > 0
+      - gateway_publish_attach in ['host', 'apex', 's3']
+      - gateway_publish_attach != 'host' or gateway_publish_hostname | length > 0
+      - gateway_publish_action == 'unpublish' or gateway_publish_rules | length > 0
+      - gateway_publish_auth in ['gateway', 'none']
+    fail_msg: >-
+      gateway_publish needs a DNS-label gateway_publish_name ('{{ gateway_publish_name }}'), a
+      gateway_publish_namespace, gateway_publish_attach host|apex|s3 (host also needs
+      gateway_publish_hostname), gateway_publish_rules to publish, and gateway_publish_auth gateway|none.
+    quiet: true
+
+- name: "gateway_publish | context | Platform values"
+  ansible.builtin.set_fact:
+    # Foreign: owned by the gateway role (domain-wide inputs).
+    _gateway_publish_gw_name: "{{ gateway_name | default('eg-gateway') }}"
+    _gateway_publish_gw_namespace: "{{ gateway_namespace | default('envoy-gateway-system') }}"
+    _gateway_publish_tls_mode: "{{ gateway_tls_mode | default('selfsigned') }}"
+    _gateway_publish_tls_secret: "{{ gateway_tls_secret_name | default('gateway-tls') }}"
+    _gateway_publish_issuer: "{{ gateway_ca_issuer_name | default('gateway-issuer') }}"
+    _gateway_publish_s3_section: "{{ gateway_s3_listener_name | default('https-s3') }}"
+    _gateway_publish_s3_host: >-
+      {{ gateway_s3_hostname | default((gateway_s3_subdomain | default('s3')) ~ '.' ~ base_domain_name) }}
+    _gateway_publish_hosts_key: "{{ gateway_hostnames_annotation | default('gateway.enterprise-ai/hostnames') }}"
+    _gateway_publish_ls_label: "{{ gateway_listenersets_label | default('gateway.enterprise-ai/allow-listenersets') }}"
+    _gateway_publish_backend: "{{ _resolved_gateway_backend | default(gateway_backend | default('envoy')) }}"
+    _gateway_publish_route: "{{ gateway_publish_route_name or gateway_publish_name }}"
+
+- name: "gateway_publish | context | Read the platform Gateway"
+  kubernetes.core.k8s_info:
+    api_version: gateway.networking.k8s.io/v1
+    kind: Gateway
+    name: "{{ _gateway_publish_gw_name }}"
+    namespace: "{{ _gateway_publish_gw_namespace }}"
+  register: _gateway_publish_gw
+  # No Gateway API at all: nothing to unpublish from; publish fails below.
+  failed_when: >-
+    _gateway_publish_gw is failed
+    and 'Failed to find exact match' not in (_gateway_publish_gw.msg | default(''))
+
+- name: "gateway_publish | context | Require the platform Gateway"
+  ansible.builtin.assert:
+    that: _gateway_publish_gw.resources | default([]) | length > 0
+    fail_msg: >-
+      Gateway {{ _gateway_publish_gw_namespace }}/{{ _gateway_publish_gw_name }} not found: install the
+      platform gateway (component 'gateway') before publishing {{ gateway_publish_name }}.
+    quiet: true
+  when: gateway_publish_action == 'publish'
+
+- name: "gateway_publish | context | Mode and route parent"
+  vars:
+    _gw: "{{ _gateway_publish_gw.resources | default([{}]) | first }}"
+    _mode: "{{ 'listenerset' if _gw.spec.allowedListeners is defined else 'listener' }}"
+    _gw_parent: {name: "{{ _gateway_publish_gw_name }}", namespace: "{{ _gateway_publish_gw_namespace }}"}
+    _listener: "{{ gateway_publish_namespace ~ '-' ~ gateway_publish_name }}"
+  ansible.builtin.set_fact:
+    _gateway_publish_mode: "{{ _mode }}"
+    # Listener mode: the listener on the shared Gateway, and its server-side-apply owner.
+    _gateway_publish_listener: "{{ _listener }}"
+    _gateway_publish_field_manager: "gateway-publish/{{ gateway_publish_namespace }}/{{ gateway_publish_name }}"
+    _gateway_publish_secret: >-
+      {{ gateway_publish_name ~ '-listener-tls' if _mode == 'listenerset' else _listener ~ '-tls' }}
+    _gateway_publish_parent: >-
+      {{ {'group': 'gateway.networking.k8s.io', 'kind': 'ListenerSet', 'name': gateway_publish_name,
+          'namespace': gateway_publish_namespace, 'sectionName': gateway_publish_name}
+         if gateway_publish_attach == 'host' and _mode == 'listenerset'
+         else _gw_parent | combine({'sectionName': _listener}) if gateway_publish_attach == 'host'
+         else _gw_parent | combine({'sectionName': 'https-apex'}) if gateway_publish_attach == 'apex'
+         else _gw_parent | combine({'sectionName': _gateway_publish_s3_section}) }}
+    _gateway_publish_hostnames: >-
+      {{ gateway_publish_route_hostnames
+         or ([gateway_publish_hostname] if gateway_publish_attach == 'host'
+             else [base_domain_name] if gateway_publish_attach == 'apex' else [_gateway_publish_s3_host]) }}

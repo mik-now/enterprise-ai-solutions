@@ -1,0 +1,85 @@
+# Copyright (C) 2024-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+---
+# =============================================================================
+# gateway_publish | ListenerSet mode (Gateway API >= v1.5)
+# =============================================================================
+# A ListenerSet in the solution namespace with one HTTPS listener for the host,
+# its own leaf (selfsigned) or the operator certificate (custom, referenced
+# across namespaces with a ReferenceGrant), admitting routes from that
+# namespace only. The platform's host-grant policy checks the host at admission.
+# =============================================================================
+
+- name: "gateway_publish | publish | listenerset | Issue the certificate"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: cert-manager.io/v1
+      kind: Certificate
+      metadata:
+        name: "{{ _gateway_publish_secret }}"
+        namespace: "{{ gateway_publish_namespace }}"
+      spec:
+        secretName: "{{ _gateway_publish_secret }}"
+        issuerRef: {name: "{{ _gateway_publish_issuer }}", kind: ClusterIssuer}
+        dnsNames: ["{{ gateway_publish_hostname }}"]
+  when: _gateway_publish_tls_mode == 'selfsigned'
+
+- name: "gateway_publish | publish | listenerset | Allow the operator certificate across namespaces"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: gateway.networking.k8s.io/v1beta1
+      kind: ReferenceGrant
+      metadata:
+        name: "listenerset-{{ gateway_publish_namespace }}-{{ gateway_publish_name }}"
+        namespace: "{{ _gateway_publish_gw_namespace }}"
+        labels: "{{ ownership_labels | default({}) }}"
+      spec:
+        from: [{group: gateway.networking.k8s.io, kind: ListenerSet, namespace: "{{ gateway_publish_namespace }}"}]
+        to: [{group: "", kind: Secret, name: "{{ _gateway_publish_tls_secret }}"}]
+  when: _gateway_publish_tls_mode == 'custom'
+
+- name: "gateway_publish | publish | listenerset | Apply the ListenerSet"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: gateway.networking.k8s.io/v1
+      kind: ListenerSet
+      metadata:
+        name: "{{ gateway_publish_name }}"
+        namespace: "{{ gateway_publish_namespace }}"
+      spec:
+        parentRef:
+          name: "{{ _gateway_publish_gw_name }}"
+          namespace: "{{ _gateway_publish_gw_namespace }}"
+        listeners:
+          - name: "{{ gateway_publish_name }}"
+            hostname: "{{ gateway_publish_hostname }}"
+            port: 443
+            protocol: HTTPS
+            tls:
+              mode: Terminate
+              certificateRefs:
+                - >-
+                  {{ {'kind': 'Secret', 'name': _gateway_publish_secret} if _gateway_publish_tls_mode == 'selfsigned'
+                     else {'kind': 'Secret', 'name': _gateway_publish_tls_secret,
+                           'namespace': _gateway_publish_gw_namespace} }}
+            allowedRoutes:
+              namespaces:
+                from: Same
+
+- name: "gateway_publish | publish | listenerset | Wait for the ListenerSet to be programmed"
+  kubernetes.core.k8s_info:
+    api_version: gateway.networking.k8s.io/v1
+    kind: ListenerSet
+    name: "{{ gateway_publish_name }}"
+    namespace: "{{ gateway_publish_namespace }}"
+  register: _gateway_publish_ls
+  until: >-
+    _gateway_publish_ls.resources | default([]) | length > 0 and
+    _gateway_publish_ls.resources[0].status.conditions | default([])
+      | selectattr('type', 'in', ['Accepted', 'Programmed']) | selectattr('status', 'eq', 'True') | list | length == 2
+  retries: "{{ gateway_publish_wait_retries }}"
+  delay: 5
+  when: gateway_publish_wait | bool

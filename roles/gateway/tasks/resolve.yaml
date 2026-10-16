@@ -1,0 +1,36 @@
+# Copyright (C) 2024-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+---
+# =============================================================================
+# gateway | resolve
+# =============================================================================
+# Runs in preflight, before the component loop; facts only, no cluster calls.
+# Input : gateway_backend
+# Output: _resolved_gateway_backend  normalised selector
+#         _resolved_gateway_role     backend role to run
+# =============================================================================
+
+- name: "gateway | resolve | Normalise the backend selector"
+  ansible.builtin.set_fact:
+    _resolved_gateway_backend: "{{ gateway_backend | string | trim | lower }}"
+
+- name: "gateway | resolve | Assert the backend is registered"
+  ansible.builtin.assert:
+    that: _resolved_gateway_backend in (gateway_backends | map(attribute='name') | list)
+    fail_msg: >-
+      gateway_backend '{{ gateway_backend }}' is not one of
+      {{ gateway_backends | map(attribute='name') | join(', ') }}.
+    quiet: true
+
+- name: "gateway | resolve | Select the backend role"
+  ansible.builtin.set_fact:
+    _resolved_gateway_role: >-
+      {{ (gateway_backends | selectattr('name', 'eq', _resolved_gateway_backend) | first).role }}
+
+- name: "gateway | resolve | Backend preflight"
+  ansible.builtin.include_role:
+    name: "{{ _resolved_gateway_role }}"
+    tasks_from: preflight.yaml
+  vars:
+    _entry: "{{ gateway_backends | selectattr('name', 'eq', _resolved_gateway_backend) | first }}"
+  when: _entry.preflight | default(false) | bool

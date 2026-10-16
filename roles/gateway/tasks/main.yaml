@@ -1,0 +1,24 @@
+# Copyright (C) 2024-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+---
+# =============================================================================
+# gateway | dispatcher
+# =============================================================================
+# Resolves the backend (normally done in preflight) and runs it with the same
+# component_action; the backend's own guarded main.yaml dispatches the action.
+# =============================================================================
+
+- name: "gateway | Assert supported action"
+  ansible.builtin.assert:
+    that: component_action in ['install', 'teardown', 'validate']
+    fail_msg: "gateway: unsupported component_action='{{ component_action | default('') }}'"
+    quiet: true
+
+- name: "gateway | Resolve the backend"
+  ansible.builtin.include_tasks: resolve.yaml
+  when: _resolved_gateway_role is not defined
+
+- name: "gateway | Dispatch action: {{ component_action }}"
+  ansible.builtin.include_role:
+    name: "{{ _resolved_gateway_role }}"
+  tags: [gateway]

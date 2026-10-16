@@ -122,7 +122,7 @@ seaweedfs_volume_storage_size: "10Gi"
 cert_manager_enabled: true
 metallb_enabled: true
 postgresql_enabled: true
-envoy_gateway_enabled: true
+gateway_enabled: true
 
 # =============================================================================
 # Optional Features (only read when the matching option above selects them)

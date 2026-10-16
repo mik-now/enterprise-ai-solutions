@@ -1,0 +1,82 @@
+# Copyright (C) 2024-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+---
+# =============================================================================
+# gateway_envoy | Gateway policies and admission
+# =============================================================================
+# Timeout and authentication for every route on the Gateway, the S3 listener's
+# path handling, and the ListenerSet host-grant policy (ListenerSet mode only;
+# in listener mode solutions cannot write the Gateway, and each published
+# listener admits routes from its owner namespace only).
+# =============================================================================
+
+- name: "gateway_envoy | install | policies | Default request timeout"
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('ansible.builtin.template', 'backend-traffic-policy.yaml.j2') | from_yaml }}"
+
+- name: "gateway_envoy | install | policies | Gateway authentication ({{ auth_provider | default('none') }})"
+  kubernetes.core.k8s:
+    state: "{{ 'present' if auth_provider | default('none') in ['keycloak', 'litellm'] else 'absent' }}"
+    definition: "{{ lookup('ansible.builtin.template', 'security-policy.yaml.j2') | from_yaml }}"
+
+- name: "gateway_envoy | install | policies | S3 listener path handling"
+  kubernetes.core.k8s:
+    state: "{{ 'present' if gateway_s3_listener_enabled | bool else 'absent' }}"
+    definition: "{{ lookup('ansible.builtin.template', 'client-traffic-policy.yaml.j2') | from_yaml }}"
+
+- name: "gateway_envoy | install | policies | S3 path normalization stays on in path mode"
+  ansible.builtin.debug:
+    msg: >-
+      routing_mode is 'path', so the ONTAP S3 API shares {{ base_domain_name }} with the UI and gets
+      no listener of its own: an object key with '//' or '%2F' reaches the store with a different
+      canonical URI than the client signed (SignatureDoesNotMatch). Use routing_mode 'subdomain' for
+      the dedicated '{{ gateway_s3_listener_name }}' listener.
+  when:
+    - ontap_s3_data_lif | default('', true) | string | trim | length > 0
+    - (routing_mode | default('subdomain')) == 'path'
+
+- name: "gateway_envoy | install | policies | ListenerSet host grants"
+  kubernetes.core.k8s:
+    state: "{{ 'present' if gateway_attach_mode == 'listenerset' else 'absent' }}"
+    definition: "{{ lookup('ansible.builtin.template', 'listenerset-grant-policy.yaml.j2') | from_yaml_all | list }}"
+
+- name: "gateway_envoy | install | policies | Remove policies of earlier releases"
+  kubernetes.core.k8s:
+    state: absent
+    api_version: admissionregistration.k8s.io/v1
+    kind: "{{ item.1 }}"
+    name: "{{ item.0 }}"
+  loop: >-
+    {{ __gateway_envoy_legacy_policies
+       | product(['ValidatingAdmissionPolicyBinding', 'ValidatingAdmissionPolicy']) | list }}
+  loop_control:
+    label: "{{ item.1 }}/{{ item.0 }}"
+
+# The ServiceMonitor needs the Prometheus Operator CRDs, which observability
+# installs after the gateway: on a first install it appears with the next run.
+- name: "gateway_envoy | install | policies | Look for the Prometheus Operator API"
+  kubernetes.core.k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: servicemonitors.monitoring.coreos.com
+  register: _gateway_envoy_sm_crd
+
+- name: "gateway_envoy | install | policies | ServiceMonitor for the controller"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: monitoring.coreos.com/v1
+      kind: ServiceMonitor
+      metadata:
+        name: envoy-gateway
+        namespace: "{{ gateway_envoy_namespace }}"
+        labels: {app: envoy-gateway}
+      spec:
+        selector:
+          matchLabels: {app.kubernetes.io/name: gateway-helm}
+        namespaceSelector:
+          matchNames: ["{{ gateway_envoy_namespace }}"]
+        endpoints:
+          - {port: metrics, path: /metrics, interval: 30s}
+  when: _gateway_envoy_sm_crd.resources | default([]) | length > 0

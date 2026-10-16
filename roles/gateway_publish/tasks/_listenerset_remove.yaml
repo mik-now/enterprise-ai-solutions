@@ -1,0 +1,32 @@
+# Copyright (C) 2024-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+---
+# =============================================================================
+# gateway_publish | remove the ListenerSet-mode objects (if any)
+# =============================================================================
+# The ListenerSet kind does not exist below Gateway API v1.5: not an error.
+
+- name: "gateway_publish | remove | listenerset | Delete the ListenerSet and its certificate"
+  kubernetes.core.k8s:
+    state: absent
+    api_version: "{{ item.api }}"
+    kind: "{{ item.kind }}"
+    name: "{{ item.name }}"
+    namespace: "{{ item.namespace }}"
+  vars:
+    _ns: "{{ gateway_publish_namespace }}"
+    _tls: "{{ gateway_publish_name }}-listener-tls"
+  loop:
+    - {api: gateway.networking.k8s.io/v1, kind: ListenerSet, name: "{{ gateway_publish_name }}", namespace: "{{ _ns }}"}
+    - {api: cert-manager.io/v1, kind: Certificate, name: "{{ _tls }}", namespace: "{{ _ns }}"}
+    - {api: v1, kind: Secret, name: "{{ _tls }}", namespace: "{{ _ns }}"}
+    - api: gateway.networking.k8s.io/v1beta1
+      kind: ReferenceGrant
+      name: "listenerset-{{ _ns }}-{{ gateway_publish_name }}"
+      namespace: "{{ _gateway_publish_gw_namespace }}"
+  loop_control:
+    label: "{{ item.kind }}/{{ item.name }}"
+  register: _gateway_publish_ls_del
+  failed_when: >-
+    _gateway_publish_ls_del is failed
+    and 'Failed to find exact match' not in (_gateway_publish_ls_del.msg | default(''))

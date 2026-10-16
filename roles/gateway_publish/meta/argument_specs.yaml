@@ -1,0 +1,60 @@
+# Copyright (C) 2024-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+---
+argument_specs:
+  main:
+    short_description: Publish or unpublish one service on the platform Gateway
+    description:
+      - Creates the HTTPRoute and, for host attach, the host's own listener (a ListenerSet when the
+        Gateway accepts them, else a listener on the Gateway), its certificate and the namespace host grant.
+      - Sets gateway_publish_result {mode, attach, parent_ref, hostnames, route}.
+    options:
+      gateway_publish_action:
+        type: str
+        choices: [publish, unpublish]
+        default: publish
+        description: Create or remove the publication.
+      gateway_publish_name:
+        type: str
+        required: true
+        description: DNS label naming the listener, route and certificate (unique per namespace).
+      gateway_publish_namespace:
+        type: str
+        required: true
+        description: Namespace of the route and its backend Services.
+      gateway_publish_attach:
+        type: str
+        choices: [host, apex, s3]
+        default: host
+        description: A listener of its own, the platform apex listener, or the platform S3 listener.
+      gateway_publish_hostname:
+        type: str
+        default: ""
+        description: Host to publish (host attach).
+      gateway_publish_route_hostnames:
+        type: list
+        elements: str
+        default: []
+        description: HTTPRoute hostnames; default the published, apex or S3 host.
+      gateway_publish_rules:
+        type: list
+        elements: dict
+        default: []
+        description: HTTPRoute spec.rules (required to publish).
+      gateway_publish_route_name:
+        type: str
+        default: ""
+        description: HTTPRoute name; default gateway_publish_name.
+      gateway_publish_auth:
+        type: str
+        choices: [gateway, none]
+        default: gateway
+        description: Keep the Gateway's authentication, or exempt the route (it authenticates itself).
+      gateway_publish_wait:
+        type: bool
+        default: true
+        description: Wait until the listener and the route are programmed.
+      gateway_publish_wait_retries:
+        type: int
+        default: 36
+        description: Wait attempts, 5 seconds apart.

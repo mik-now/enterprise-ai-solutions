@@ -460,19 +460,17 @@ The same stack serves:
 
 The stack uses the **Kubernetes Gateway API** (Envoy Gateway implementation), which supports **host routing**, **path routing**, and **header / method / query matching** simultaneously on every `HTTPRoute`.
 
-### Gateway listener (already deployed)
+### Gateway listeners (already deployed)
 
-`roles/envoy_gateway/templates/gateway.yaml.j2` provisions a wildcard-host HTTPS listener:
+`roles/gateway_envoy/templates/gateway.yaml.j2` provisions the platform Gateway `eg-gateway` (`gateway_name`) in `envoy-gateway-system` (`gateway_namespace`) with platform listeners only:
 
-```yaml
-listeners:
-  - name: https
-    protocol: HTTPS
-    port: 443
-    hostname: "*.<base_domain_name>"   # accepts any subdomain
-```
+| Listener | Hostname | Admits routes from |
+|---|---|---|
+| `http` | any (port 80) | gateway namespace only — redirects to HTTPS |
+| `https-apex` | `<base_domain_name>` | all namespaces (UI, path-routed services) |
+| `https-s3` | `s3.<base_domain_name>` | all namespaces — only when `ontap_s3_data_lif` is set and `routing_mode` is not `path` |
 
-Each `HTTPRoute` then claims the exact hostnames + paths it owns.
+There is no wildcard listener: every other host gets a listener of its own, with its own certificate, published through the `gateway_publish` role (below). Routes on the apex host need no listener of their own — attach them to `sectionName: https-apex`.
 
 ### What's running today
 
@@ -483,20 +481,54 @@ Each `HTTPRoute` then claims the exact hostnames + paths it owns.
 
 So the stack is already exercising **pure host routing** (Keycloak) and **host + path routing combined** (inference).
 
-> [!IMPORTANT]
-> **Platform hostnames are reserved.** The shared listeners admit routes from
-> every namespace, and the Gateway API resolves two routes claiming the same
-> hostname by match specificity regardless of namespace. To stop a route in one
-> namespace from claiming a platform hostname (e.g. `inference.<base>`) with a
-> more specific match and hijacking its traffic, a `ValidatingAdmissionPolicy`
-> reserves each hostname in `gateway_protected_hostnames` to its owning
-> namespace — a claim from any other namespace is rejected at admission. Use a
-> hostname your namespace owns (the patterns below), or have an operator add
-> yours to `gateway_protected_hostnames` in the `envoy_gateway` role.
+### Publishing a host from a solution repo (`gateway_publish`)
 
-### Patterns you can add with `kubectl apply` — no stack changes
+Solutions (this repo's keycloak and grafana; litellm, langfuse, envoy_ai_gateway, agentgateway in `ext/enterprise.ai-inference`; app_edp, app_ui, app_mcp_gateway in `ext/enterprise.ai-erag`) never edit the Gateway directly. They call the `gateway_publish` library role, which reads the live Gateway and picks the mechanism:
+
+- **ListenerSet mode** — the Gateway sets `allowedListeners` (Gateway API >= v1.5; the installer's own Envoy Gateway, OpenShift 4.23). A `ListenerSet` and its certificate are created in the solution namespace. The `gateway-listenerset-host-grant` `ValidatingAdmissionPolicy` admits a ListenerSet only for HTTPS :443 hosts listed in its namespace's `gateway.enterprise-ai/hostnames` annotation, admitting routes from the same namespace only.
+- **Listener mode** — otherwise (e.g. OpenShift 4.22, Gateway API v1.4.1). One listener `<namespace>-<name>` is added to the shared Gateway by server-side apply under field manager `gateway-publish/<namespace>/<name>`; its certificate lives in the gateway namespace and it admits routes from the owner namespace only.
+
+Either way the host is first granted to the namespace (annotation `gateway.enterprise-ai/hostnames` plus label `gateway.enterprise-ai/allow-listenersets=true`); a host already granted to another namespace is refused. Namespaces are cluster-scoped, so a tenant cannot grant itself someone else's host. The role then creates the `HTTPRoute` and, with `gateway_publish_auth: none`, a `SecurityPolicy` `<route>-no-auth` that exempts it from the Gateway's JWT policy.
+
+```yaml
+- name: Publish my-app on the gateway
+  ansible.builtin.include_role:
+    name: gateway_publish
+  vars:
+    gateway_publish_name: my-app                      # DNS label: listener, route, certificate
+    gateway_publish_namespace: "{{ my_app_namespace }}"
+    gateway_publish_hostname: "my-app.{{ base_domain_name }}"
+    gateway_publish_auth: none                        # the app authenticates its own users
+    gateway_publish_rules:                            # HTTPRoute spec.rules
+      - backendRefs:
+          - {name: my-app, port: 8080}
+  when: gateway_create | bool
+```
+
+Teardown calls the same role with `gateway_publish_action: unpublish` and the same inputs; it removes the route, the listener or ListenerSet, and the grant.
+
+| Input | Default | Meaning |
+|---|---|---|
+| `gateway_publish_action` | `publish` | `publish` \| `unpublish` |
+| `gateway_publish_name` | — | DNS label naming the listener, route and certificate |
+| `gateway_publish_namespace` | — | namespace of the route and its backend Services |
+| `gateway_publish_attach` | `host` | `host` (own listener for `gateway_publish_hostname`) \| `apex` (`https-apex`, no grant) \| `s3` (`https-s3`) |
+| `gateway_publish_hostname` | — | host to publish (`host` attach) |
+| `gateway_publish_route_hostnames` | published / apex / S3 host | `HTTPRoute` `spec.hostnames` override |
+| `gateway_publish_rules` | — | `HTTPRoute` `spec.rules` (required to publish) |
+| `gateway_publish_route_name` | `gateway_publish_name` | `HTTPRoute` name |
+| `gateway_publish_auth` | `gateway` | `gateway` (Gateway JWT applies) \| `none` (service authenticates) |
+| `gateway_publish_wait` | `true` | wait until listener and route are programmed |
+
+The role sets `gateway_publish_result` (`mode`, `attach`, `parent_ref`, `hostnames`, `route`); use `gateway_publish_result.parent_ref` to attach further routes or policies to the same listener.
+
+### Routing patterns — no stack changes
+
+A route attaches only to a listener that serves its host: `https-apex` for `<base_domain_name>`, or a host published with `gateway_publish`. The rules below drop into `gateway_publish_rules` (or the `spec` of an `HTTPRoute` attached to `gateway_publish_result.parent_ref`).
 
 #### 1. Subdomain per tenant
+
+Publish `tenant-a.<base>` from the tenant's namespace (`gateway_publish_name: tenant-a`, `gateway_publish_namespace: tenant-a`, `gateway_publish_hostname: tenant-a.<base>`). In ListenerSet mode the resulting route is:
 
 ```yaml
 apiVersion: gateway.networking.k8s.io/v1
@@ -506,8 +538,11 @@ metadata:
   namespace: tenant-a
 spec:
   parentRefs:
-    - name: eg-gateway
-      namespace: envoy-gateway-system
+    - group: gateway.networking.k8s.io
+      kind: ListenerSet          # listener mode: name eg-gateway, namespace envoy-gateway-system,
+      name: tenant-a             #   sectionName tenant-a-tenant-a
+      namespace: tenant-a
+      sectionName: tenant-a
   hostnames:
     - tenant-a.<base>
   rules:
@@ -589,19 +624,19 @@ A single rule can require host + path + headers + method + query params **all at
 
 ### Cross-namespace routing
 
-If your service lives in a different namespace from the gateway, add a `ReferenceGrant` once:
+Routes live in the solution namespace next to their Services, so no grant is needed. If an `HTTPRoute` must reach a Service in another namespace, add a `ReferenceGrant` in the Service's namespace:
 
 ```yaml
 apiVersion: gateway.networking.k8s.io/v1beta1
 kind: ReferenceGrant
 metadata:
-  name: allow-from-gateway
-  namespace: my-app-ns
+  name: allow-routes-from-my-app
+  namespace: backend-ns
 spec:
   from:
     - group: gateway.networking.k8s.io
       kind: HTTPRoute
-      namespace: envoy-gateway-system
+      namespace: my-app-ns
   to:
     - group: ""
       kind: Service
@@ -653,7 +688,7 @@ These are the rare cases:
 | **Alternative Intel® Xeon® optimizations** | Tune NRI balloon sizing, adjust CPU policy, or update `kubernetes_accelerator` for new Xeon generations |
 | **Non-OpenAI inference protocol** (raw gRPC, Triton v2 without predictor) | Custom `HTTPRoute` + `Backend` resource pointing to the service |
 | **mTLS-only auth** | Replace the JWT `SecurityPolicy` with a client-cert policy and provision certs via cert-manager |
-| **Cross-namespace gateway exposure** | Add `ReferenceGrant` from your namespace to `envoy-gateway-system` |
+| **Publish a new host** | Call the `gateway_publish` role from your solution's install (see [Publishing a host](#publishing-a-host-from-a-solution-repo-gateway_publish)) — no Gateway edits |
 | **Add a new persistent service to the installer** | Write a role under `roles/<name>/`, register it in `playbooks/site.yaml` and `es_auto_installer.sh` |
 
 ---
@@ -681,5 +716,6 @@ These are the rare cases:
 | Dig into the underlying inference-serving repo (`model-manager`, vLLM/OVMS configs) | [Model Manager (Enterprise Inference) on GitHub](https://github.com/intel/enterprise-inference) |
 
 Config file references for the auth flow above:
-- Envoy Gateway `SecurityPolicy`: `roles/envoy_gateway/templates/security-policy.yaml.j2`
+- Envoy Gateway `SecurityPolicy`: `roles/gateway_envoy/templates/security-policy.yaml.j2`
+- Host publishing contract: `roles/gateway_publish/defaults/main.yaml`, `roles/gateway_publish/meta/argument_specs.yaml`
 - Keycloak realm/client config: `ext/enterprise.ai-inference/roles/keycloak_config/`

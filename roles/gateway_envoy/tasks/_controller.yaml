@@ -1,0 +1,112 @@
+# Copyright (C) 2024-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+---
+# =============================================================================
+# gateway_envoy | controller (Helm) and its namespace
+# =============================================================================
+# install / upgrade: helm upgrade --install to gateway_envoy_version. On an
+# existing release the values other layers set are kept (inference's AI Gateway
+# extension), then ours are applied on top. keep: a newer release than ours is
+# left alone (never downgraded).
+# CRDs never come from the chart: skip_crds drops crds/, and crds.enabled: false
+# drops the chart's crds subchart, whose templates would otherwise install the
+# Gateway API safe-upgrades policy on clusters whose CRDs are not ours.
+# =============================================================================
+
+- name: "gateway_envoy | install | controller | Create namespace"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ gateway_envoy_namespace }}"
+        labels: >-
+          {{ (ownership_labels | default({}))
+             | combine({'istio.io/dataplane-mode': 'ambient'} if istio_enabled | default(false) | bool else {})
+             | combine({'pod-security.kubernetes.io/enforce': 'restricted',
+                        'pod-security.kubernetes.io/audit': 'restricted',
+                        'pod-security.kubernetes.io/warn': 'restricted'}
+                       if enforce_pss | default(false) | bool else {}) }}
+
+- name: "gateway_envoy | install | controller | Helm {{ _gateway_envoy_action }} to {{ gateway_envoy_version }}"
+  kubernetes.core.helm:
+    name: "{{ gateway_envoy_helm_release }}"
+    chart_ref: "{{ gateway_envoy_helm_repo }}"
+    chart_version: "v{{ gateway_envoy_version }}"
+    release_namespace: "{{ gateway_envoy_namespace }}"
+    skip_crds: true
+    reset_then_reuse_values: "{{ _gateway_envoy_action != 'install' }}"
+    wait: "{{ helm_wait }}"
+    timeout: "{{ helm_timeout }}"
+    values:
+      crds:
+        enabled: false
+      deployment:
+        envoyGateway:
+          affinity: "{{ _platform_affinity | default({}) }}"
+      # The Backend extension API is how a route reaches an endpoint outside the
+      # cluster with upstream TLS of its own (the ONTAP S3 reverse proxy).
+      config:
+        envoyGateway:
+          extensionApis:
+            enableBackend: true
+  register: _gateway_envoy_helm
+  until: _gateway_envoy_helm is succeeded
+  retries: "{{ helm_retries }}"
+  delay: 15
+  when: _gateway_envoy_action in ['install', 'upgrade'] or _gateway_envoy_installed_version == gateway_envoy_version
+
+- name: "gateway_envoy | install | controller | Wait for the controller"
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    name: envoy-gateway
+    namespace: "{{ gateway_envoy_namespace }}"
+  register: _gateway_envoy_deploy
+  until:
+    - _gateway_envoy_deploy.resources | length > 0
+    - _gateway_envoy_deploy.resources[0].status.conditions | default([])
+      | selectattr('type', 'eq', 'Available') | selectattr('status', 'eq', 'True') | list | length > 0
+  retries: 60
+  delay: 5
+
+# The Gateway's proxy is the north-south mesh edge: external clients have no
+# mesh identity, so it accepts plaintext inbound. Selector-scoped so the
+# internal ai-gateway proxy in the same namespace stays STRICT.
+- name: "gateway_envoy | install | controller | Allow external ingress at the edge proxy (mTLS PERMISSIVE)"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: security.istio.io/v1
+      kind: PeerAuthentication
+      metadata:
+        name: eg-gateway-edge
+        namespace: "{{ gateway_envoy_namespace }}"
+      spec:
+        selector:
+          matchLabels:
+            gateway.envoyproxy.io/owning-gateway-name: "{{ gateway_name }}"
+        mtls:
+          mode: PERMISSIVE
+  when: istio_enabled | default(false) | bool
+
+# The host-network API server has no mesh identity, so it cannot reach the
+# controller's admission webhook under STRICT; only that port is opened.
+- name: "gateway_envoy | install | controller | Allow the API server to reach the webhook (port-level mTLS)"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: security.istio.io/v1
+      kind: PeerAuthentication
+      metadata:
+        name: allow-webhook-ctrl
+        namespace: "{{ gateway_envoy_namespace }}"
+      spec:
+        selector:
+          matchLabels:
+            control-plane: envoy-gateway
+        mtls:
+          mode: STRICT
+        portLevelMtls: "{{ {'9443': {'mode': 'PERMISSIVE'}} }}"
+  when: istio_enabled | default(false) | bool

@@ -21,7 +21,7 @@ Pod Security Admission (PSA) and Istio ambient labels applied to every namespace
 |---|---|---|---|---|---|
 | `istio-system` | `privileged` | `privileged` | `privileged` | `ambient` | `istio` |
 | `cert-manager` | `restricted` | `restricted` | `restricted` | `ambient` | `cert_manager` |
-| `envoy-gateway-system` | `privileged` | `privileged` | `privileged` | `ambient` | `envoy_gateway` |
+| `envoy-gateway-system` | `privileged` | `privileged` | `privileged` | `ambient` | `gateway_envoy` |
 | `metallb-system` | `privileged` | `privileged` | `privileged` | — | `metallb` |
 | `cnpg-system` | `restricted` | `restricted` | `restricted` | `ambient` | `postgresql` |
 | `postgresql` | `restricted` | `restricted` | `restricted` | `ambient` | `postgresql` |
@@ -93,6 +93,15 @@ The namespaces below only exist once `install erag` has run. They are not create
 | `metallb-system` | MetalLB L2 speaker uses raw ARP sockets at host level — not a mesh participant. |
 | `system` (GMC) | Internal pipeline orchestration; east-west mTLS not required between co-located components. |
 | `nri-balloons-controller` | Host-level CPU pinning daemon; not a service mesh participant. |
+
+## Gateway host grants
+
+`gateway_publish` marks every namespace that publishes a host on the platform Gateway. Keys are owned by the `gateway` role (`gateway_hostnames_annotation`, `gateway_listenersets_label`); unpublish removes the host and, with the last host, the mark.
+
+| Key | Kind | Value | Effect |
+|---|---|---|---|
+| `gateway.enterprise-ai/hostnames` | annotation | comma-separated hosts | Hosts granted to the namespace. A host granted to another namespace is refused; in ListenerSet mode the `gateway-listenerset-host-grant` ValidatingAdmissionPolicy rejects a ListenerSet for any host not listed. |
+| `gateway.enterprise-ai/allow-listenersets` | label | `"true"` | ListenerSet mode: the Gateway's `allowedListeners` admits ListenerSets only from namespaces with this label. |
 
 ---
 

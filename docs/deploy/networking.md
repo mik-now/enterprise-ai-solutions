@@ -153,17 +153,23 @@ metadata:
   namespace: envoy-gateway-system
 spec:
   gatewayClassName: eg
+  allowedListeners:              # ListenerSet mode only (Gateway API >= v1.5)
+    namespaces:
+      from: Selector
+      selector:
+        matchLabels:
+          gateway.enterprise-ai/allow-listenersets: "true"
   listeners:
-    - name: http
+    - name: http                 # redirect to HTTPS only
       protocol: HTTP
       port: 80
       allowedRoutes:
         namespaces:
-          from: All
-    - name: https
+          from: Same
+    - name: https-apex           # bare base domain (UI, path-routed services)
       protocol: HTTPS
       port: 443
-      hostname: "*.inference-example.com"
+      hostname: "inference-example.com"
       tls:
         mode: Terminate
         certificateRefs:
@@ -172,7 +178,11 @@ spec:
       allowedRoutes:
         namespaces:
           from: All
+    # https-s3 (s3.inference-example.com) is added when ontap_s3_data_lif is set
+    # and routing_mode is not path.
 ```
+
+There is no wildcard listener. Every other host (`keycloak.<base>`, `litellm.<base>`, ...) is published by its solution through the `gateway_publish` role: a `ListenerSet` in the solution namespace when the Gateway sets `allowedListeners`, else a listener `<namespace>-<name>` on this Gateway. Each published host has its own certificate and admits routes from its owner namespace only; the `gateway-listenerset-host-grant` `ValidatingAdmissionPolicy` rejects a ListenerSet for a host not granted to its namespace. See [Publishing a host](../customize/integration.md#publishing-a-host-from-a-solution-repo-gateway_publish).
 
 ### SecurityPolicy (JWT Authentication)
 
@@ -262,7 +272,7 @@ In Intel® AI for Enterprise Solutions, all workload namespaces are enrolled in 
 - **Exceptions are owned by the component that creates the workload**, not centralized in the istio role: each role applies its own `PeerAuthentication` right after its ambient-label task. The istio role owns only the mesh-wide default and the `cert-manager` exception (istio-csr is its own dependency). This way nothing pre-defines a namespace/port for a component that may not be installed.
 - **Mesh-edge exceptions** — namespaces/workloads that receive traffic from *outside* the mesh get a `PeerAuthentication: PERMISSIVE` overriding STRICT for them only:
   - `cert-manager` (namespace-wide, **istio role**) — the trust root (istio-csr CA + cert-manager webhook); STRICT here deadlocks cert bootstrap.
-  - `eg-gateway` (selector-scoped, **envoy_gateway role**) — the north-south ingress edge proxy; external clients present no mesh identity. The internal `ai-gateway` proxy in the same namespace stays STRICT (reached in-mesh via passthrough).
+  - `eg-gateway` (selector-scoped, **gateway_envoy role**) — the north-south ingress edge proxy; external clients present no mesh identity. The internal `ai-gateway` proxy in the same namespace stays STRICT (reached in-mesh via passthrough).
 - **Admission-webhook exceptions** — the kube-apiserver is host-network with **no mesh identity**, so STRICT rejects its calls to any in-mesh admission webhook (symptom: `failed calling webhook … EOF` at admission time). Each owning role gives its operator a `PeerAuthentication` with `portLevelMtls` opening **only** the webhook container port (`9443` for CNPG/KServe/LWS/AI-gateway/envoy-gateway controllers; `10250`/`6443` for the Prometheus operator/adapter) as PERMISSIVE — every other port (e.g. metrics scrape) stays STRICT.
 - **Calico handles L3 routing** (pod-to-pod IP, VXLAN or direct), Istio handles **L4 identity and encryption** on top.
 - Namespaces excluded from the mesh: `metallb-system` (raw ARP), `csi-driver-nfs` (host network; the CSI driver mounts NFS on the node, not through a pod's network), `kube-system`.

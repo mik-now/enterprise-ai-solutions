@@ -1,0 +1,42 @@
+# Copyright (C) 2024-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+---
+# =============================================================================
+# gateway_publish | defaults
+# =============================================================================
+# Library role: a solution publishes one service on the platform Gateway with
+#
+#   - ansible.builtin.include_role:
+#       name: gateway_publish
+#     vars:
+#       gateway_publish_name: litellm
+#       gateway_publish_namespace: "{{ litellm_namespace }}"
+#       gateway_publish_hostname: "{{ litellm_hostname }}"
+#       gateway_publish_rules: [...]          # HTTPRoute spec.rules
+#
+# and removes it with gateway_publish_action: unpublish (same inputs). The
+# mechanism follows the live Gateway: a ListenerSet per host when it accepts
+# ListenerSets (Gateway API >= v1.5), else a listener per host on the Gateway
+# itself. Either way the host gets its own certificate and admits routes from
+# the owner namespace only. Result: gateway_publish_result.
+# =============================================================================
+
+# ── Action ────────────────────────────────────────────────────────────────────
+gateway_publish_action: "publish"         # publish | unpublish
+
+# ── What to publish ───────────────────────────────────────────────────────────
+gateway_publish_name: ""                  # DNS label: names the listener, route and certificate
+gateway_publish_namespace: ""             # namespace of the route and its backend Services
+# host: a listener of its own for gateway_publish_hostname (granted to the namespace)
+# apex: the platform's apex listener (UI, path-routed services); shared, no grant
+# s3:   the platform's S3 listener (signed S3 paths kept intact)
+gateway_publish_attach: "host"            # host | apex | s3
+gateway_publish_hostname: ""              # host attach: the host to publish
+gateway_publish_route_hostnames: []       # default: the published host, the apex host, or the S3 host
+gateway_publish_rules: []                 # HTTPRoute spec.rules (publish)
+gateway_publish_route_name: ""            # default: gateway_publish_name
+gateway_publish_auth: "gateway"           # gateway: the Gateway's auth applies | none: the service authenticates
+
+# ── Behaviour ─────────────────────────────────────────────────────────────────
+gateway_publish_wait: true                # wait until listener and route are programmed
+gateway_publish_wait_retries: 36          # x 5s

@@ -1,0 +1,29 @@
+# Copyright (C) 2024-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+---
+# =============================================================================
+# gateway_envoy | internal constants (not user-tunable)
+# =============================================================================
+
+# Gateway API groups whose CRDs this role may own.
+__gateway_envoy_gwapi_groups: [gateway.networking.k8s.io, gateway.networking.x-k8s.io]
+# Field managers that wrote Gateway API CRDs on clusters installed before this
+# role existed (the istio role's manifest apply, Helm's crds/ directory, and the
+# envoy_gateway role's server-side apply).
+# CRDs touched only by these and by the API server are adopted as ours.
+__gateway_envoy_legacy_crd_managers:
+  - helm
+  - OpenAPI-Generator
+  - kubectl
+  - kubectl-client-side-apply
+  - kubectl-create
+  - kube-apiserver
+  - ai-solutions-envoy-gateway
+# OpenShift's Ingress Operator protects the Gateway API CRDs with this policy;
+# its presence alone means the CRDs are never ours.
+__gateway_envoy_openshift_crd_policy: "openshift-ingress-operator-gatewayapi-crd-admission"
+# Listeners and policies of earlier releases, removed on install.
+__gateway_envoy_legacy_listeners: [https]
+__gateway_envoy_legacy_policies: [eg-protected-hostname-ownership, eg-listener-hostname-grant]
+# Deployments of an Envoy Gateway controller carry this label.
+__gateway_envoy_controller_selector: "control-plane=envoy-gateway"

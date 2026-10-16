@@ -1,0 +1,59 @@
+# Copyright (C) 2024-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+---
+# =============================================================================
+# gateway_envoy | CRDs
+# =============================================================================
+# Envoy Gateway CRDs always; Gateway API CRDs (standard channel, the bundle of
+# gateway_envoy_version) only when _detect.yaml found them ours or absent.
+# Rendered from the release's gateway-crds-helm chart and applied server-side,
+# as upstream recommends: the bundle exceeds Helm's release size limit and Helm
+# never upgrades crds/. The Gateway API bundle brings the upstream
+# safe-upgrades ValidatingAdmissionPolicy with it.
+# =============================================================================
+
+- name: "gateway_envoy | install | crds | Render the CRDs"
+  kubernetes.core.helm_template:
+    chart_ref: "{{ gateway_envoy_crds_helm_repo }}"
+    chart_version: "v{{ gateway_envoy_version }}"
+    include_crds: true
+    values:
+      crds:
+        gatewayAPI:
+          enabled: "{{ _gateway_envoy_gwapi_apply | bool }}"
+          channel: standard
+        envoyGateway:
+          enabled: true
+  register: _gateway_envoy_crds_rendered
+  until: _gateway_envoy_crds_rendered is succeeded
+  retries: "{{ helm_retries }}"
+  delay: 15
+  changed_when: false
+  check_mode: false
+
+- name: "gateway_envoy | install | crds | Apply the CRDs (server-side)"
+  kubernetes.core.k8s:
+    state: present
+    apply: true
+    server_side_apply:
+      field_manager: "{{ gateway_envoy_field_manager }}"
+      force_conflicts: true
+    definition: >-
+      {{ _gateway_envoy_crds_rendered.stdout | from_yaml_all | select
+         | map('combine', {'metadata': {'labels': ownership_labels | default({})}}, recursive=true) | list }}
+
+- name: "gateway_envoy | install | crds | Wait for the CRDs to be established"
+  kubernetes.core.k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: "{{ item }}"
+    wait: true
+    wait_condition:
+      type: Established
+      status: "True"
+    wait_timeout: 120
+  loop: >-
+    {{ ['envoyproxies.gateway.envoyproxy.io', 'securitypolicies.gateway.envoyproxy.io']
+       + (['gateways.gateway.networking.k8s.io', 'httproutes.gateway.networking.k8s.io']
+          + (['listenersets.gateway.networking.k8s.io'] if gateway_attach_mode == 'listenerset' else [])
+          if _gateway_envoy_gwapi_apply | bool else []) }}

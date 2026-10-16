@@ -1,0 +1,187 @@
+# Copyright (C) 2024-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+---
+# =============================================================================
+# gateway_envoy | TLS for the platform listeners
+# =============================================================================
+# selfsigned: bootstrap ClusterIssuer → root CA Certificate (isCA) → CA
+#   ClusterIssuer gateway_ca_issuer_name, which signs one leaf per platform
+#   listener host (apex, and the S3 host when that listener is on) and every
+#   leaf gateway_publish issues. The root certificate is exported so operators
+#   trust every host by importing one file.
+# custom: one Secret from the operator's files serves every listener.
+# There is no wildcard leaf: every listener names exactly its own host.
+# =============================================================================
+
+- name: "gateway_envoy | install | tls | Validate the TLS configuration"
+  ansible.builtin.assert:
+    that:
+      - gateway_tls_mode in ['selfsigned', 'custom']
+      - base_domain_name | default('') | length > 0
+      - gateway_tls_mode == 'selfsigned' or (gateway_tls_cert_file | length > 0 and gateway_tls_key_file | length > 0)
+    fail_msg: >-
+      gateway_tls_mode must be selfsigned or custom (got '{{ gateway_tls_mode }}'), base_domain_name must be
+      set, and custom mode needs gateway_tls_cert_file and gateway_tls_key_file (global_config.yaml).
+    quiet: true
+
+# ── Custom certificate ───────────────────────────────────────────────────────
+
+- name: "gateway_envoy | install | tls | Read the custom certificate and key"
+  ansible.builtin.slurp:
+    src: "{{ item }}"
+  loop: ["{{ gateway_tls_cert_file }}", "{{ gateway_tls_key_file }}"]
+  register: _gateway_envoy_custom_tls
+  no_log: "{{ secure_logs | default(true) | bool }}"
+  when: gateway_tls_mode == 'custom'
+
+- name: "gateway_envoy | install | tls | Create the TLS Secret from the custom certificate"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: "{{ gateway_tls_secret_name }}"
+        namespace: "{{ gateway_namespace }}"
+      type: kubernetes.io/tls
+      data:
+        tls.crt: "{{ _gateway_envoy_custom_tls.results[0].content }}"
+        tls.key: "{{ _gateway_envoy_custom_tls.results[1].content }}"
+  no_log: "{{ secure_logs | default(true) | bool }}"
+  when: gateway_tls_mode == 'custom'
+
+# ── Internal root CA (selfsigned) ─────────────────────────────────────────────
+
+- name: "gateway_envoy | install | tls | Create the bootstrap and CA ClusterIssuers, root CA"
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ item }}"
+  loop:
+    - apiVersion: cert-manager.io/v1
+      kind: ClusterIssuer
+      metadata:
+        name: "{{ gateway_ca_bootstrap_issuer_name }}"
+        labels: "{{ ownership_labels | default({}) }}"
+      spec:
+        selfSigned: {}
+    - apiVersion: cert-manager.io/v1
+      kind: Certificate
+      metadata:
+        name: "{{ gateway_ca_cert_name }}"
+        # Foreign: owned by cert_manager (its cluster-resource namespace).
+        namespace: "{{ certmanager_namespace | default('cert-manager') }}"
+        labels: "{{ ownership_labels | default({}) }}"
+      spec:
+        isCA: true
+        commonName: "{{ gateway_ca_common_name }}"
+        secretName: "{{ gateway_ca_secret_name }}"
+        duration: "{{ gateway_ca_duration }}"
+        renewBefore: "{{ gateway_ca_renew_before }}"
+        privateKey: {algorithm: ECDSA, size: 256}
+        issuerRef: {name: "{{ gateway_ca_bootstrap_issuer_name }}", kind: ClusterIssuer, group: cert-manager.io}
+  loop_control:
+    label: "{{ item.kind }}/{{ item.metadata.name }}"
+  register: _gateway_envoy_ca
+  # cert-manager's webhook can still be starting right after its install.
+  until: _gateway_envoy_ca is succeeded
+  retries: 12
+  delay: 10
+  when: gateway_tls_mode == 'selfsigned'
+
+- name: "gateway_envoy | install | tls | Wait for the root CA secret"
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: "{{ gateway_ca_secret_name }}"
+    namespace: "{{ certmanager_namespace | default('cert-manager') }}"
+  register: _gateway_envoy_ca_secret
+  until:
+    - _gateway_envoy_ca_secret.resources | default([]) | length > 0
+    - _gateway_envoy_ca_secret.resources[0].data | default({}) | length > 0
+  retries: 30
+  delay: 5
+  no_log: "{{ secure_logs | default(true) | bool }}"
+  when: gateway_tls_mode == 'selfsigned'
+
+- name: "gateway_envoy | install | tls | Create the CA ClusterIssuer"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: cert-manager.io/v1
+      kind: ClusterIssuer
+      metadata:
+        name: "{{ gateway_ca_issuer_name }}"
+        labels: "{{ ownership_labels | default({}) }}"
+      spec:
+        ca:
+          secretName: "{{ gateway_ca_secret_name }}"
+  when: gateway_tls_mode == 'selfsigned'
+
+# ── Platform listener leaves (selfsigned) ─────────────────────────────────────
+
+- name: "gateway_envoy | install | tls | Issue the platform listener leaves"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: cert-manager.io/v1
+      kind: Certificate
+      metadata:
+        name: "{{ item.secret }}-cert"
+        namespace: "{{ gateway_namespace }}"
+      spec:
+        secretName: "{{ item.secret }}"
+        issuerRef: {name: "{{ gateway_ca_issuer_name }}", kind: ClusterIssuer}
+        dnsNames: ["{{ item.host }}"]
+  loop: "{{ _gateway_envoy_leaves }}"
+  loop_control:
+    label: "{{ item.host }}"
+  when: gateway_tls_mode == 'selfsigned'
+
+- name: "gateway_envoy | install | tls | Wait for the platform listener leaves"
+  kubernetes.core.k8s_info:
+    api_version: cert-manager.io/v1
+    kind: Certificate
+    name: "{{ item.secret }}-cert"
+    namespace: "{{ gateway_namespace }}"
+  register: _gateway_envoy_leaf
+  until:
+    - _gateway_envoy_leaf.resources | default([]) | length > 0
+    - _gateway_envoy_leaf.resources[0].status.conditions | default([])
+      | selectattr('type', 'eq', 'Ready') | selectattr('status', 'eq', 'True') | list | length > 0
+  retries: 30
+  delay: 5
+  loop: "{{ _gateway_envoy_leaves }}"
+  loop_control:
+    label: "{{ item.host }}"
+  when: gateway_tls_mode == 'selfsigned'
+
+- name: "gateway_envoy | install | tls | Remove the S3 leaf when its listener is off"
+  kubernetes.core.k8s:
+    state: absent
+    api_version: "{{ item.api }}"
+    kind: "{{ item.kind }}"
+    name: "{{ item.name }}"
+    namespace: "{{ gateway_namespace }}"
+  loop:
+    - {api: cert-manager.io/v1, kind: Certificate, name: "{{ gateway_s3_tls_secret_name }}-cert"}
+    - {api: v1, kind: Secret, name: "{{ gateway_s3_tls_secret_name }}"}
+  loop_control:
+    label: "{{ item.kind }}/{{ item.name }}"
+  when: gateway_tls_mode == 'selfsigned' and not gateway_s3_listener_enabled | bool
+
+# ── Export the root CA (public certificate only) ─────────────────────────────
+
+- name: "gateway_envoy | install | tls | Export the root CA certificate"
+  ansible.builtin.copy:
+    content: "{{ _gateway_envoy_ca_secret.resources[0].data['ca.crt'] | b64decode }}"
+    dest: "{{ gateway_ca_export_path }}"
+    mode: "0644"
+  when: gateway_tls_mode == 'selfsigned'
+
+- name: "gateway_envoy | install | tls | Root CA trust instructions"
+  ansible.builtin.debug:
+    msg:
+      - "Root CA exported: {{ gateway_ca_export_path }}"
+      - "Import it to trust https://{{ base_domain_name }} and every published host"
+      - "Linux: sudo cp {{ gateway_ca_export_path }} /usr/local/share/ca-certificates/ && sudo update-ca-certificates"
+  when: gateway_tls_mode == 'selfsigned'

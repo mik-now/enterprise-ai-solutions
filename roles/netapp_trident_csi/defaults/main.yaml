@@ -89,7 +89,7 @@ ontap_data_ports: [2049, 111]
 
 # --- ONTAP S3 (optional; object store on the same SVM) ---
 # Only the S3 leg of this role's reachability matrix reads these. The other
-# consumers - the S3 listener in roles/envoy_gateway and the RAG data-prep layer -
+# consumers - the S3 listener in roles/gateway (gateway_s3_*) and the RAG data-prep layer -
 # are separate roles, so role defaults are out of scope for them: set the values
 # in env/<env>/global_config.yaml, not here.
 #

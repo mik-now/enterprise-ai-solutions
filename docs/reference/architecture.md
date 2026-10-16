@@ -32,7 +32,7 @@ infrastructure  →  platform  →  inference  →  erag (opt-in)
   kubernetes      cert_manager    envoy_ai_gw    app_inference_models
   storage         istio           kserve         app_pre_install
                   metallb         litellm        app_vector_databases
-                  envoy_gateway   langfuse       app_keycloak_config
+                  gateway         langfuse       app_keycloak_config
                   postgresql      keycloak_cfg   app_apisix
                   keycloak*       llm_services   app_chat_history
                   object_store    nri_cpu_balloons  app_nats
@@ -95,7 +95,7 @@ playbooks/site.yaml (universal dispatcher)
 │   ├─ role: cert_manager         → tasks/install.yaml (helm install)
 │   ├─ role: istio                → tasks/install.yaml (ambient mesh — all workload namespaces enrolled)
 │   ├─ role: metallb              → tasks/install.yaml (LoadBalancer services)
-│   ├─ role: envoy_gateway        → tasks/install.yaml (helm install + TLS)
+│   ├─ role: gateway              → backend gateway_envoy (Envoy Gateway + Gateway API CRDs + TLS)
 │   ├─ role: postgresql           → tasks/install.yaml (CNPG operator + clusters)
 │   ├─ role: keycloak             → tasks/install.yaml (skipped when auth_provider=litellm)
 │   ├─ role: object_store         → tasks/install.yaml (backend selection)
@@ -198,10 +198,20 @@ enterprise-ai-solutions/
     │   └── tasks/
     │       ├── install.yaml                    # Istio ambient mesh (ztunnel + waypoint)
     │       └── teardown.yaml
-    ├── envoy_gateway/
+    ├── gateway/                                # Domain dispatcher: gateway_backend → backend role
     │   └── tasks/
-    │       ├── install.yaml                    # Helm install + TLS config
-    │       └── teardown.yaml
+    │       ├── main.yaml
+    │       └── resolve.yaml                    # Backend selection (run in preflight)
+    ├── gateway_envoy/                          # Backend: Envoy Gateway
+    │   └── tasks/
+    │       ├── install.yaml                    # CRDs (when ours) + controller + TLS + Gateway + policies
+    │       ├── validate.yaml
+    │       └── teardown.yaml                   # Ownership-aware
+    ├── gateway_publish/                        # Library role: solutions publish a host (not a component)
+    │   └── tasks/
+    │       ├── main.yaml                       # publish | unpublish
+    │       ├── _listenerset.yaml               # ListenerSet mode (Gateway API >= v1.5)
+    │       └── _listener.yaml                  # Listener mode (one listener on the shared Gateway)
     ├── postgresql/
     │   └── tasks/
     │       ├── install.yaml                    # CNPG operator + database clusters
@@ -344,7 +354,7 @@ Components are defined in `components.yaml` files (this repo + ext repos). Each 
 | Layer | Components | Installation |
 |-------|-----------|--------------|
 | infrastructure | kubernetes, storage | Auto-pulled by `install inference` or `install erag` |
-| platform | cert_manager, istio, metallb, envoy_gateway, postgresql, keycloak*, object_store, seaweedfs, observability | Auto-pulled by `install inference` or `install erag` |
+| platform | cert_manager, istio, metallb, gateway, postgresql, keycloak*, object_store, seaweedfs, observability | Auto-pulled by `install inference` or `install erag` |
 | inference | keycloak_config*, envoy_ai_gateway, kserve, litellm**, langfuse**, llm_services, nri_cpu_balloons*** | `install inference` (explicitly named, or auto-pulled by `install erag`) |
 | erag | app_inference_models, app_pre_install, app_vector_databases, app_keycloak_config, app_apisix, app_chat_history, app_nats, app_fingerprint, app_hpa, app_pipeline, app_edp, app_mcp_gateway, app_ui, app_watcher, app_post_install | `install erag` (opt-in, requires `init erag` first) |
 
@@ -562,8 +572,10 @@ All roles follow the same pattern: `defaults/main.yaml` for config, `tasks/main.
 | `netapp_trident_csi` | Storage backend: NetApp Trident operator + ONTAP `TridentBackendConfig` + StorageClass (`reclaimPolicy: Retain`, `volumeBindingMode: Immediate`). Splits its tasks by what they need (variables / nodes / array) so everything but the array probes runs offline. See [NetApp ONTAP](../deploy/netapp_ontap.md). |
 | `metallb` | MetalLB for LoadBalancer services. IP ranges from `env/<name>/nodes.yaml` or `global_config.yaml`. |
 | `cert_manager` | Helm install cert-manager (prerequisite for KServe, Istio, gateway TLS). |
-| `istio` | Istio ambient mesh (1.27.x). All workload namespaces enrolled via `istio.io/dataplane-mode: ambient` label. Provides zero-trust mTLS without sidecars. |
-| `envoy_gateway` | Helm install from OCI registry, waits for deployment rollout, TLS config, SecurityPolicy for auth. |
+| `istio` | Istio ambient mesh (1.27.x). All workload namespaces enrolled via `istio.io/dataplane-mode: ambient` label. Provides zero-trust mTLS without sidecars. Does not install Gateway API CRDs. |
+| `gateway` | Domain dispatcher (component `gateway`, `gateway_enabled`). Resolves `gateway_backend` (only `envoy`) to a backend role and owns the domain-wide `gateway_*` inputs (Gateway name/namespace, TLS, CA issuer, S3 listener, host-grant keys). |
+| `gateway_envoy` | Backend: Envoy Gateway (`gateway_envoy_version`) and the Gateway API CRDs (standard channel) — the CRDs only when it owns them, never on OpenShift. Re-running install upgrades in place, never downgrades. Creates the platform Gateway (`http`, `https-apex`, optional `https-s3`), TLS, the JWT/ext-auth SecurityPolicy, and in ListenerSet mode the `gateway-listenerset-host-grant` ValidatingAdmissionPolicy. Publishes `gateway_attach_mode` (`listenerset` \| `listener`). Teardown is ownership-aware. |
+| `gateway_publish` | Library role (not a component). Solutions `include_role` it to publish or unpublish one host: grants the host to the namespace, creates a ListenerSet or a Gateway listener per the live Gateway, the HTTPRoute, and optionally a no-auth SecurityPolicy. See [Integration](../customize/integration.md#publishing-a-host-from-a-solution-repo-gateway_publish). |
 | `postgresql` | CNPG operator + PostgreSQL clusters for Keycloak, LiteLLM, Langfuse. |
 | `keycloak` | Keycloak operator + instance. Auto-disabled when `auth_provider=litellm`. |
 | `object_store` | Selects and configures the object store backend (seaweedfs/rustfs). |
@@ -696,17 +708,17 @@ Every Intel® AI for Enterprise Solutions component version is pinned in config,
 
 1. Edit **one line** in `env/<name>/global_config.yaml`:
    ```yaml
-   envoy_gateway_version: "1.4.0"    # was 1.3.0
+   gateway_envoy_version: "1.9.2"    # was 1.8.0
    ```
 
 2. Re-run:
    ```bash
-   ./es_auto_installer.sh install envoy_gateway --only --env <name>
+   ./es_auto_installer.sh install gateway --only --env <name>
    ```
 
 Alternatively, override at runtime without editing files:
 ```bash
-./es_auto_installer.sh install envoy_gateway --only --env <name> -- -e envoy_gateway_version=1.4.0
+./es_auto_installer.sh install gateway --only --env <name> -- -e gateway_envoy_version=1.9.2
 ```
 
 ---

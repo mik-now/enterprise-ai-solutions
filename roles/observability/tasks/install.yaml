@@ -680,56 +680,25 @@
 # 6. Grafana HTTPRoute (expose via Envoy Gateway)
 # =============================================================================
 
-- name: "observability | Expose Grafana via gateway HTTPRoute"
-  kubernetes.core.k8s:
-    state: present
-    definition:
-      apiVersion: gateway.networking.k8s.io/v1
-      kind: HTTPRoute
-      metadata:
-        name: grafana
-        namespace: "{{ observability_namespace }}"
-      spec:
-        parentRefs:
-          # Pin to the HTTPS listener only. Without sectionName an HTTPRoute
-          # attaches to every compatible listener, including the plaintext
-          # HTTP:80 one, which would serve Grafana admin credentials in cleartext.
-          - name: "{{ gateway_name }}"
-            namespace: "{{ gateway_namespace }}"
-            sectionName: https
-        hostnames:
-          - "{{ observability_grafana_hostname }}"
-        rules:
-          - filters:
-              # HSTS: only ever reach Grafana over HTTPS on a compliant browser,
-              # so a later plaintext attempt is refused before the admin
-              # credential leaves the browser. Only honored over HTTPS, so it is
-              # set here on the :443 route, not the :80 redirect.
-              - type: ResponseHeaderModifier
-                responseHeaderModifier:
-                  set:
-                    - name: Strict-Transport-Security
-                      value: "max-age=31536000; includeSubDomains"
-            backendRefs:
-              - name: kube-prometheus-stack-grafana
-                port: 80
+# Grafana has its own login, so the Gateway's JWT policy does not apply.
+- name: "observability | install | Publish Grafana on the gateway"
+  ansible.builtin.include_role:
+    name: gateway_publish
+  vars:
+    gateway_publish_name: grafana
+    gateway_publish_namespace: "{{ observability_namespace }}"
+    gateway_publish_hostname: "{{ observability_grafana_hostname }}"
+    gateway_publish_auth: none
+    gateway_publish_rules:
+      - filters:
+          # HSTS: the admin credential never leaves a compliant browser in plaintext.
+          - type: ResponseHeaderModifier
+            responseHeaderModifier:
+              set:
+                - {name: Strict-Transport-Security, value: "max-age=31536000; includeSubDomains"}
+        backendRefs:
+          - {name: kube-prometheus-stack-grafana, port: 80}
   when: gateway_create | default(false) | bool
-
-- name: "observability | Bypass gateway auth for Grafana (Grafana has its own login)"
-  kubernetes.core.k8s:
-    state: present
-    definition:
-      apiVersion: gateway.envoyproxy.io/v1alpha1
-      kind: SecurityPolicy
-      metadata:
-        name: grafana-no-auth
-        namespace: "{{ observability_namespace }}"
-      spec:
-        targetRefs:
-          - group: gateway.networking.k8s.io
-            kind: HTTPRoute
-            name: grafana
-  when: gateway_create | default(false) | bool and auth_provider | default('none') in ['keycloak', 'litellm']
 
 - name: "observability | Store Grafana admin credentials as a cluster Secret"
   kubernetes.core.k8s:

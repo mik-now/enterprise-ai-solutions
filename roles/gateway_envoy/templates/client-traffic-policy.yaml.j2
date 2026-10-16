@@ -1,0 +1,23 @@
+{# Copyright (C) 2024-2026 Intel Corporation #}
+{# SPDX-License-Identifier: Apache-2.0 #}
+{#
+gateway_envoy | path handling for the S3 API listener only. SigV4 signs the path
+byte for byte, so Envoy's two default rewrites break keys with an empty segment
+('//') or an encoded slash ('%2F'). Scoped to that listener so normalization
+stays on for every other host. Envoy's normalize_path (dot segments) has no
+Gateway API knob; keys containing '..' are rejected before signing.
+#}
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: ClientTrafficPolicy
+metadata:
+  name: {{ (gateway_name ~ '-s3-path') | to_json }}
+  namespace: {{ gateway_namespace | to_json }}
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: {{ gateway_name | to_json }}
+      sectionName: {{ gateway_s3_listener_name | to_json }}
+  path:
+    disableMergeSlashes: true
+    escapedSlashesAction: KeepUnchanged

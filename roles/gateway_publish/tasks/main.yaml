@@ -1,0 +1,15 @@
+# Copyright (C) 2024-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+---
+- name: "gateway_publish | Assert supported action"
+  ansible.builtin.assert:
+    that: gateway_publish_action in ['publish', 'unpublish']
+    fail_msg: "gateway_publish: unsupported gateway_publish_action='{{ gateway_publish_action | default('') }}'"
+    quiet: true
+
+- name: "gateway_publish | Resolve the context"
+  ansible.builtin.include_tasks: _context.yaml
+
+- name: "gateway_publish | Dispatch action: {{ gateway_publish_action }}"
+  ansible.builtin.include_tasks: "_{{ gateway_publish_action }}.yaml"
+  tags: [gateway_publish]

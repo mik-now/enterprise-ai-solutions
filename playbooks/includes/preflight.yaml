@@ -276,6 +276,30 @@
   when: not (node_topology_enabled | default(true) | bool)
 
 # Resolve storage_backend to a specific role or configuration.
+- name: "Preflight - Gateway: reject settings of the envoy_gateway role"
+  vars:
+    _legacy:
+      envoy_gateway_enabled: gateway_enabled
+      envoy_gateway_version: gateway_envoy_version
+      envoy_gateway_namespace: gateway_envoy_namespace
+      envoy_gateway_helm_repo: gateway_envoy_helm_repo
+      gateway_protected_hostnames: "(removed: every published host has its own listener, see gateway_publish)"
+      gateway_route_admission_enabled: "(removed)"
+      gateway_no_auth_routes: "(removed: gateway_publish_auth: none on the route's publication)"
+    _set: "{{ _legacy | dict2items | selectattr('key', 'in', vars) | list }}"
+  ansible.builtin.assert:
+    that: _set | length == 0
+    fail_msg: >-
+      The envoy_gateway component is now gateway (backend gateway_envoy). Rename or remove in
+      env/{{ env_name | default('<name>') }}/global_config.yaml:
+      {% for i in _set %}{{ i.key }} -> {{ i.value }}{{ '; ' if not loop.last }}{% endfor %}.
+    quiet: true
+
+- name: "Preflight - Gateway: resolve backend"
+  ansible.builtin.include_role:
+    name: gateway
+    tasks_from: resolve.yaml
+
 - name: "Preflight - Storage: resolve backend"
   ansible.builtin.include_role:
     name: storage

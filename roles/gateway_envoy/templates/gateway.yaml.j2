@@ -1,0 +1,60 @@
+{# Copyright (C) 2024-2026 Intel Corporation #}
+{# SPDX-License-Identifier: Apache-2.0 #}
+{#
+gateway_envoy | the platform Gateway - platform listeners only.
+Solutions add their hosts through gateway_publish: a ListenerSet each when
+allowedListeners is set (Gateway API >= v1.5), else a listener each on this
+Gateway under their own server-side-apply field manager. allowedListeners is
+rendered only in ListenerSet mode: Gateway API < v1.5 has no such field.
+#}
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: {{ gateway_name | to_json }}
+  namespace: {{ gateway_namespace | to_json }}
+spec:
+  gatewayClassName: {{ gateway_envoy_class_name | to_json }}
+{% if gateway_attach_mode == 'listenerset' %}
+  allowedListeners:
+    namespaces:
+      from: Selector
+      selector:
+        matchLabels:
+          {{ gateway_listenersets_label | to_json }}: "true"
+{% endif %}
+  listeners:
+    # Plaintext :80 only redirects; only the redirect route (this namespace) attaches.
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Same
+    # The bare base_domain_name (UI, path-routed services).
+    - name: https-apex
+      protocol: HTTPS
+      port: 443
+      hostname: {{ base_domain_name | to_json }}
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: {{ gateway_tls_secret_name | to_json }}
+      allowedRoutes:
+        namespaces:
+          from: All
+{% if gateway_s3_listener_enabled | bool %}
+    # S3 API: carries the ClientTrafficPolicy that keeps signed paths intact.
+    - name: {{ gateway_s3_listener_name | to_json }}
+      protocol: HTTPS
+      port: 443
+      hostname: {{ gateway_s3_hostname | to_json }}
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: {{ (gateway_s3_tls_secret_name if gateway_tls_mode == 'selfsigned' else gateway_tls_secret_name) | to_json }}
+      allowedRoutes:
+        namespaces:
+          from: All
+{% endif %}

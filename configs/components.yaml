@@ -84,9 +84,10 @@ components:
     enabled: "{{ metallb_enabled | default(true) | bool }}"
     depends_on: []
 
-  - name: envoy_gateway
+  # Domain dispatcher: runs the backend selected by gateway_backend (gateway_envoy).
+  - name: gateway
     layer: platform
-    enabled: "{{ envoy_gateway_enabled | default(true) | bool }}"
+    enabled: "{{ gateway_enabled | default(true) | bool }}"
     depends_on: [cert_manager, metallb]
 
   - name: postgresql
@@ -97,7 +98,7 @@ components:
   - name: keycloak
     layer: platform
     enabled: "{{ keycloak_enabled | default(auth_provider | default('keycloak') != 'litellm') | bool }}"
-    depends_on: [cert_manager, envoy_gateway, postgresql]
+    depends_on: [cert_manager, gateway, postgresql]
 
   - name: object_store
     layer: platform

@@ -1,0 +1,94 @@
+# Copyright (C) 2024-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+---
+# =============================================================================
+# gateway_envoy | validate (read-only)
+# =============================================================================
+# Works standalone: re-derives the attach mode with the same read-only
+# detection install uses, then checks behaviour - the controller serves the
+# class, the Gateway is programmed with exactly the platform listeners it
+# should have, the mode matches the CRDs, and TLS is in place.
+# =============================================================================
+
+- name: "gateway_envoy | validate | Detect"
+  ansible.builtin.include_tasks: _detect.yaml
+
+- name: "gateway_envoy | validate | Read the GatewayClass, Gateway and host-grant policy"
+  kubernetes.core.k8s_info:
+    api_version: "{{ item.api }}"
+    kind: "{{ item.kind }}"
+    name: "{{ item.name }}"
+    namespace: "{{ item.namespace | default(omit) }}"
+  loop:
+    - {api: gateway.networking.k8s.io/v1, kind: GatewayClass, name: "{{ gateway_envoy_class_name }}"}
+    - api: gateway.networking.k8s.io/v1
+      kind: Gateway
+      name: "{{ gateway_name }}"
+      namespace: "{{ gateway_namespace }}"
+    - api: admissionregistration.k8s.io/v1
+      kind: ValidatingAdmissionPolicy
+      name: gateway-listenerset-host-grant
+    - {api: v1, kind: Secret, name: "{{ gateway_tls_secret_name }}", namespace: "{{ gateway_namespace }}"}
+  loop_control:
+    label: "{{ item.kind }}/{{ item.name }}"
+  register: _gateway_envoy_v
+
+- name: "gateway_envoy | validate | Assert the platform Gateway works"
+  ansible.builtin.assert:
+    that: item.ok | bool
+    fail_msg: "{{ item.msg }}"
+    quiet: true
+  vars:
+    _gc: "{{ _gateway_envoy_v.results[0].resources | first | default({}) }}"
+    _gw: "{{ _gateway_envoy_v.results[1].resources | first | default({}) }}"
+    _ok: "{{ not gateway_create | bool }}"
+    _gc_accepted: >-
+      {{ _gc.status.conditions | default([]) | selectattr('type', 'eq', 'Accepted')
+         | selectattr('status', 'eq', 'True') | list | length > 0 }}
+    _gw_programmed: >-
+      {{ _gw.status.conditions | default([]) | selectattr('type', 'eq', 'Programmed')
+         | selectattr('status', 'eq', 'True') | list | length > 0 }}
+    _names: "{{ _gw.spec.listeners | default([]) | map(attribute='name') | list }}"
+    _want: "{{ ['http', 'https-apex'] + ([gateway_s3_listener_name] if gateway_s3_listener_enabled | bool else []) }}"
+    _ls_mode: "{{ gateway_attach_mode == 'listenerset' }}"
+    _has_vap: "{{ _gateway_envoy_v.results[2].resources | length > 0 }}"
+  loop:
+    - ok: "{{ _gateway_envoy_installed_version | length > 0 }}"
+      msg: "No {{ gateway_envoy_helm_release }} release in {{ gateway_envoy_namespace }}."
+    - ok: "{{ _gc_accepted }}"
+      msg: "GatewayClass {{ gateway_envoy_class_name }} is not accepted: no controller serves it."
+    - ok: "{{ _ok or _gw_programmed }}"
+      msg: >-
+        Gateway {{ gateway_namespace }}/{{ gateway_name }} is not programmed:
+        {{ _gw.status.conditions | default([]) | map(attribute='message', default='') | join('; ') }}
+    - ok: "{{ _ok or _want | difference(_names) | length == 0 }}"
+      msg: "Gateway lacks platform listeners {{ _want | difference(_names) }}."
+    - ok: "{{ _ok or _names | intersect(__gateway_envoy_legacy_listeners) | length == 0 }}"
+      msg: "Gateway still has earlier-release listeners: {{ _names | intersect(__gateway_envoy_legacy_listeners) }}."
+    - ok: "{{ _ok or ((_gw.spec.allowedListeners is defined) == _ls_mode) }}"
+      msg: "Gateway allowedListeners does not match attach mode {{ gateway_attach_mode }}; re-run the install."
+    - ok: "{{ _ok or (_has_vap == _ls_mode) }}"
+      msg: "The ListenerSet host-grant policy is {{ 'missing' if _ls_mode else 'present in listener mode' }}."
+    - ok: "{{ _ok or _gateway_envoy_v.results[3].resources | length > 0 }}"
+      msg: "TLS secret {{ gateway_namespace }}/{{ gateway_tls_secret_name }} is missing."
+  loop_control:
+    label: "{{ item.msg | truncate(60) }}"
+
+- name: "gateway_envoy | validate | Check the exported root CA"
+  ansible.builtin.stat:
+    path: "{{ gateway_ca_export_path }}"
+  register: _gateway_envoy_ca_export
+  when: gateway_create | bool and gateway_tls_mode == 'selfsigned'
+
+- name: "gateway_envoy | validate | Assert the root CA was exported"
+  ansible.builtin.assert:
+    that: _gateway_envoy_ca_export.stat.exists
+    fail_msg: "Root CA not exported to {{ gateway_ca_export_path }}."
+    quiet: true
+  when: gateway_create | bool and gateway_tls_mode == 'selfsigned'
+
+- name: "gateway_envoy | validate | Result"
+  ansible.builtin.debug:
+    msg: >-
+      Envoy Gateway {{ _gateway_envoy_installed_version }} serves {{ gateway_envoy_class_name }};
+      Gateway API {{ _gateway_envoy_gwapi_bundle or '(none)' }}; services publish via {{ gateway_attach_mode }}s.

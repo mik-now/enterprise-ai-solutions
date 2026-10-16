@@ -1,0 +1,39 @@
+# Copyright (C) 2024-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+---
+# =============================================================================
+# gateway_publish | publish
+# =============================================================================
+# host attach: grant the host to the namespace, then its listener in the
+# Gateway's mode; the other mode's objects are removed, so a Gateway that
+# changed mode (e.g. Gateway API upgraded to >= v1.5) converges on a re-run.
+# Every attach: the HTTPRoute and its auth exemption.
+# =============================================================================
+
+- name: "gateway_publish | publish | Host listener"
+  when: gateway_publish_attach == 'host'
+  block:
+    - name: "gateway_publish | publish | Grant the host"
+      ansible.builtin.include_tasks: _grant.yaml
+
+    - name: "gateway_publish | publish | Listener ({{ _gateway_publish_mode }})"
+      ansible.builtin.include_tasks: "_{{ _gateway_publish_mode }}.yaml"
+
+    - name: "gateway_publish | publish | Remove the other mode's listener"
+      ansible.builtin.include_tasks:
+        file: "{{ '_listener_remove.yaml' if _gateway_publish_mode == 'listenerset' else '_listenerset_remove.yaml' }}"
+
+- name: "gateway_publish | publish | Route"
+  ansible.builtin.include_tasks: _route.yaml
+
+- name: "gateway_publish | publish | Route auth ({{ gateway_publish_auth }})"
+  ansible.builtin.include_tasks: "_policy_{{ _gateway_publish_backend }}.yaml"
+
+- name: "gateway_publish | publish | Result"
+  ansible.builtin.set_fact:
+    gateway_publish_result:
+      mode: "{{ _gateway_publish_mode }}"
+      attach: "{{ gateway_publish_attach }}"
+      parent_ref: "{{ _gateway_publish_parent }}"
+      hostnames: "{{ _gateway_publish_hostnames }}"
+      route: "{{ _gateway_publish_route }}"
