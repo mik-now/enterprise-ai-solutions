@@ -275,31 +275,73 @@
     _inference_affinity: {}
   when: not (node_topology_enabled | default(true) | bool)
 
-# Resolve storage_backend to a specific role or configuration.
-- name: "Preflight - Gateway: reject settings of the envoy_gateway role"
+# Settings of the envoy_gateway role (now gateway, backend gateway_envoy) are
+# still accepted, so env configs and CI that predate the rename keep working:
+# a renamed setting is mapped to its new name, a removed one is ignored, and
+# both are reported. Env configs arrive as extra vars, which set_fact cannot
+# override, so a setting is only mapped when its new name is unset; when both
+# are set they must agree.
+- name: "Preflight - Gateway: settings of the envoy_gateway role"
+  ansible.builtin.set_fact:
+    _gateway_legacy_renamed: >-
+      {{ __gateway_legacy_renames | dict2items | selectattr('key', 'in', vars) | list }}
+    _gateway_legacy_removed: >-
+      {{ __gateway_legacy_removed | dict2items | selectattr('key', 'in', vars) | list }}
   vars:
-    _legacy:
+    __gateway_legacy_renames:
       envoy_gateway_enabled: gateway_enabled
       envoy_gateway_version: gateway_envoy_version
       envoy_gateway_namespace: gateway_envoy_namespace
       envoy_gateway_helm_repo: gateway_envoy_helm_repo
-      gateway_protected_hostnames: "(removed: every published host has its own listener, see gateway_publish)"
-      gateway_route_admission_enabled: "(removed)"
-      gateway_no_auth_routes: "(removed: gateway_publish_auth: none on the route's publication)"
-    _set: "{{ _legacy | dict2items | selectattr('key', 'in', vars) | list }}"
+    __gateway_legacy_removed:
+      gateway_protected_hostnames: "every published host has its own listener (gateway_publish)"
+      gateway_route_admission_enabled: "host grants are always enforced"
+      gateway_no_auth_routes: "set gateway_publish_auth: none on the route's publication"
+
+- name: "Preflight - Gateway: refuse a renamed setting that disagrees with its new name"
+  vars:
+    _conflicts: "{{ _gateway_legacy_renamed | selectattr('value', 'in', vars) | list }}"
+    _differ: >-
+      {%- set out = [] -%}
+      {%- for i in _conflicts
+            if (lookup('ansible.builtin.vars', i.key) | string | lower)
+               != (lookup('ansible.builtin.vars', i.value) | string | lower) -%}
+      {%- set _ = out.append(i.key ~ '=' ~ lookup('ansible.builtin.vars', i.key)
+                             ~ ' vs ' ~ i.value ~ '=' ~ lookup('ansible.builtin.vars', i.value)) -%}
+      {%- endfor -%}
+      {{ out }}
   ansible.builtin.assert:
-    that: _set | length == 0
+    that: _differ | length == 0
     fail_msg: >-
-      The envoy_gateway component is now gateway (backend gateway_envoy). Rename or remove in
-      env/{{ env_name | default('<name>') }}/global_config.yaml:
-      {% for i in _set %}{{ i.key }} -> {{ i.value }}{{ '; ' if not loop.last }}{% endfor %}.
+      env/{{ env_name | default('<name>') }}/global_config.yaml sets both an envoy_gateway setting and its
+      gateway replacement, with different values: {{ _differ | join('; ') }}. Keep only the new name.
     quiet: true
+  when: _gateway_legacy_renamed | length > 0
+
+- name: "Preflight - Gateway: map renamed settings to their new names"
+  ansible.builtin.set_fact:
+    "{{ item.value }}": "{{ lookup('ansible.builtin.vars', item.key) }}"
+  loop: "{{ _gateway_legacy_renamed | rejectattr('value', 'in', vars) | list }}"
+  loop_control:
+    label: "{{ item.key }} -> {{ item.value }}"
+
+- name: "Preflight - Gateway: warn about settings of the envoy_gateway role"
+  ansible.builtin.debug:
+    msg: >-
+      DEPRECATED: the envoy_gateway component is now gateway (backend gateway_envoy). In
+      env/{{ env_name | default('<name>') }}/global_config.yaml (or CI), rename
+      {{ (_gateway_legacy_renamed | map(attribute='key') | zip(_gateway_legacy_renamed | map(attribute='value'))
+          | map('join', ' -> ') | join(', ')) or '-' }};
+      remove (ignored) {{ (_gateway_legacy_removed | map(attribute='key') | join(', ')) or '-' }}.
+      Support for the old names will be dropped.
+  when: (_gateway_legacy_renamed + _gateway_legacy_removed) | length > 0
 
 - name: "Preflight - Gateway: resolve backend"
   ansible.builtin.include_role:
     name: gateway
     tasks_from: resolve.yaml
 
+# Resolve storage_backend to a specific role or configuration.
 - name: "Preflight - Storage: resolve backend"
   ansible.builtin.include_role:
     name: storage
