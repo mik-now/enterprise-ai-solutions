@@ -1,0 +1,76 @@
+# Copyright (C) 2024-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+---
+# =============================================================================
+# kubernetes | Run a kubespray playbook (cluster.yml or reset.yml)
+# =============================================================================
+# Kubespray runs as an async job on the controller, with its output in
+# kubernetes_kubespray_log rather than in this play: ansible-in-ansible would
+# swallow the progress. es_auto_installer.sh tails that file for live output.
+#
+# Inputs (include vars):
+#   _kubernetes_kubespray_playbook   cluster.yml | reset.yml
+#   _kubernetes_kubespray_args       extra args for that playbook ('' for none)
+# Inputs (installer extra vars):
+#   _kubespray_become_password_file  the operator's sudo password, when one is needed
+# =============================================================================
+
+- name: "kubernetes | kubespray | Ensure log directory"
+  ansible.builtin.file:
+    path: "{{ kubernetes_kubespray_log | dirname }}"
+    state: directory
+    mode: "0755"
+
+# Highest precedence first in kubespray: the operator's file is passed last.
+- name: "kubernetes | kubespray | Find extra-vars files"
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ env_dir }}/kubespray_extra_auto.yml"
+    - "{{ env_dir }}/kubespray_extra.yml"
+  register: _kubernetes_kubespray_extra
+
+- name: "kubernetes | kubespray | Show where the output goes"
+  ansible.builtin.debug:
+    msg: "Kubespray {{ _kubernetes_kubespray_playbook }} output: {{ kubernetes_kubespray_log }}"
+
+- name: "kubernetes | kubespray | Run {{ _kubernetes_kubespray_playbook }}"
+  block:
+    - name: "kubernetes | kubespray | Run kubespray {{ _kubernetes_kubespray_playbook }}"
+      # ANSIBLE_ROLES_PATH must be unset, not empty, so kubespray's ansible.cfg
+      # roles_path applies. KUBECONFIG is unset so kubespray's own kubectl is
+      # not pointed at the env kubeconfig.
+      ansible.builtin.shell:
+        cmd: >-
+          set -euo pipefail;
+          env -u ANSIBLE_ROLES_PATH -u KUBECONFIG -u K8S_AUTH_KUBECONFIG
+          ANSIBLE_CONFIG={{ (kubespray_dir ~ '/ansible.cfg') | quote }}
+          ANSIBLE_FORCE_COLOR=true
+          ANSIBLE_HOST_KEY_CHECKING=False
+          PATH={{ (kubespray_dir ~ '/venv/bin') | quote }}:"$PATH"
+          {{ (kubespray_dir ~ '/venv/bin/ansible-playbook') | quote }}
+          -i {{ _kubespray_inventory | quote }}
+          --become --become-user=root
+          {% if _kubespray_become_password_file | default('') | length > 0 %}
+          --become-password-file {{ _kubespray_become_password_file | quote }}
+          {% endif %}
+          {{ ('-' ~ 'v' * ansible_verbosity) if ansible_verbosity | int > 0 else '' }}
+          {{ _kubernetes_kubespray_playbook | quote }} {{ _kubernetes_kubespray_args }}
+          {% for f in _kubernetes_kubespray_extra.results if f.stat.exists %}
+          -e @{{ f.item | quote }}
+          {% endfor %}
+          > {{ kubernetes_kubespray_log | quote }} 2>&1
+        chdir: "{{ kubespray_dir }}"
+        executable: /bin/bash
+      async: "{{ kubernetes_kubespray_timeout }}"
+      poll: "{{ kubernetes_kubespray_poll }}"
+      changed_when: true
+
+  rescue:
+    - name: "kubernetes | kubespray | Fail with the log location"
+      ansible.builtin.fail:
+        msg: >-
+          Kubespray {{ _kubernetes_kubespray_playbook }} failed
+          (rc={{ ansible_failed_result.rc | default('?') }}{{ ', timed out after ' ~ kubernetes_kubespray_timeout ~ 's'
+          if ansible_failed_result.msg | default('') is search('did not complete') else '' }}).
+          Output: {{ kubernetes_kubespray_log }}

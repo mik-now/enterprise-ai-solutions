@@ -30,6 +30,13 @@ kubespray_dir: "{{ playbook_dir }}/../.kubespray"
 # tree, consistent with kubespray_dir. On remote nodes /usr/local/bin is
 # kubespray-owned and left as-is.
 kubespray_bin_dir_local: "{{ kubespray_dir }}/bin"
+# Kubespray runs as an async job from the role, writing its output to this file
+# (the installer passes a per-run path and tails it). The timeout is the hard
+# limit for one cluster.yml or reset.yml run; the poll interval is how often the
+# play checks on it.
+kubernetes_kubespray_log: "{{ env_dir | default(playbook_dir + '/../env/local') }}/logs/kubespray.log"
+kubernetes_kubespray_timeout: 10800
+kubernetes_kubespray_poll: 30
 
 # --- Networking ---
 kubernetes_cni: "calico"

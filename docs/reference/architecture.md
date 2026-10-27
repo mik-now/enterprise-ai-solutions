@@ -84,12 +84,12 @@ playbooks/site.yaml (universal dispatcher)
 │         │   ├─ If exists + version OK → skip install
 │         │   └─ If not exists ↓
 │         ├─ precheck.yaml        (swap, kernel modules, sysctl, packages)
-│         ├─ install_kubespray.yaml (prep phase):
+│         ├─ install_kubespray.yaml (kubespray prep):
 │         │   ├─ Clone kubespray repo to .kubespray/ (pinned version)
 │         │   ├─ Create python venv + install requirements.txt
 │         │   ├─ Read inventory from env/<name>/inventory/hosts.yaml
-│         │   ├─ Apply kubespray_user_overrides or kubespray_full_config_file
-│         │   └─ Exit (3-phase split) → installer runs kubespray/cluster.yml
+│         │   └─ Apply kubespray_user_overrides or kubespray_full_config_file
+│         ├─ _run_kubespray.yaml  (cluster.yml as an async job → kubernetes_kubespray_log, tailed by the installer)
 │         ├─ post_install.yaml    (kubeconfig copy, node wait, helm verify)
 │         └─ storage, metallb (infrastructure components)
 │
@@ -164,7 +164,7 @@ enterprise-ai-solutions/
     │       ├── main.yaml                       # Action dispatcher
     │       ├── install.yaml                    # Detect existing or install fresh
     │       ├── precheck.yaml                   # System prerequisites
-    │       ├── install_kubespray.yaml          # Prep phase (3-phase split)
+    │       ├── install_kubespray.yaml          # Kubespray prep (stack, inventory, extra vars)
     │       ├── post_install.yaml               # Kubeconfig copy + health checks
     │       ├── teardown.yaml                   # Kubespray reset + cleanup
     │       └── validate.yaml                   # Health checks + version report
@@ -549,9 +549,10 @@ A file-level map of this repository and the external inference repo it composes 
 | `tasks/main.yaml` | Dispatches to `{{ component_action }}.yaml` |
 | `tasks/install.yaml` | Smart entry point: detects existing cluster (kubectl + kubeconfig), checks `existing_kubernetes` (BYO path), skips if cluster exists and version OK, otherwise runs precheck → install_kubespray (prep) → (installer runs cluster.yml) → post_install |
 | `tasks/precheck.yaml` | System prerequisites: OS check (Linux), swap disable, kernel modules (`br_netfilter`, `overlay`), sysctl (`ip_forward`, `bridge-nf-call-iptables`), required packages (`curl`, `tar`, `git`, `python3-pip`, `python3-venv`, `sshpass`) |
-| `tasks/install_kubespray.yaml` | **Prep phase only** (3-phase split): Clones Kubespray to `.kubespray/`, creates Python venv, reads inventory from `env/<name>/inventory/hosts.yaml`, applies `kubespray_user_overrides` or `kubespray_full_config_file`, then exits. Installer runs `cluster.yml` directly for live output. |
+| `tasks/install_kubespray.yaml` | Kubespray prep: clones Kubespray to `.kubespray/`, creates the Python venv, reads inventory from `env/<name>/inventory/hosts.yaml`, applies `kubespray_user_overrides` or `kubespray_full_config_file`. `install.yaml` then runs `cluster.yml` through `_run_kubespray.yaml`. |
+| `tasks/_run_kubespray.yaml` | Runs `cluster.yml` or `reset.yml` as an async job writing to `kubernetes_kubespray_log`; the installer tails that file for live output. |
 | `tasks/post_install.yaml` | **Post-kubespray phase**: Copies kubeconfig from first control-plane node to `env/<name>/kubeconfig.yaml`, waits for nodes ready, verifies helm, prints cluster summary. |
-| `tasks/teardown.yaml` | Runs Kubespray `reset.yml` via 3-phase split (prep → installer runs reset → cleanup), removes kubeconfig |
+| `tasks/teardown.yaml` | Runs Kubespray `reset.yml` through `_run_kubespray.yaml`, then host cleanup; the installer removes the env kubeconfig |
 | `tasks/validate.yaml` | Checks kubectl, kubeconfig exists, cluster reachable, node status, server version, summary report |
 
 #### Other platform roles

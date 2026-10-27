@@ -62,9 +62,9 @@ readonly -a ACTIONS=(configure show init install teardown validate status)
 #                     INIT_LAYER INIT_FLAVOUR INIT_UPGRADE
 #   ensure_env_dir    ENV_DIR ENV_LOG_DIR ENV_INVENTORY_DIR GLOBAL_CONFIG
 #   resolve_inventory INVENTORY
-#   ensure_sudo       _NEED_BECOME_PASS
+#   ensure_sudo       BECOME_PASS_FILE
 #   _discover_layers  LAYERS
-#   main              LOG
+#   main              LOG KUBESPRAY_LOG
 #   _resolve_kubeconfig  KUBE_CFG IS_BYO
 #   ensure_repos      ANSIBLE_ROLES_PATH (exported)
 # init sets ENV_DIR itself: it runs before any env exists, so ensure_env_dir cannot.
@@ -858,20 +858,24 @@ ensure_deps() {
 }
 
 # ensure_sudo: detect whether passwordless sudo is available on localhost.
-# Sets _NEED_BECOME_PASS=true when a password is required so run() can
-# append --ask-become-pass to the ansible-playbook invocation.
+# When a password is required, ask once and keep it in BECOME_PASS_FILE (0600,
+# removed on exit): run() passes it as --become-password-file, and the kubernetes
+# role hands the same file to the kubespray run it starts, which -K cannot reach.
 # For remote nodes, become credentials must be in the inventory
 # (ansible_become_password per host, or NOPASSWD sudoers + SSH key).
-_NEED_BECOME_PASS=false
+BECOME_PASS_FILE=""
 ensure_sudo() {
     [[ $EUID -eq 0 ]] && return 0
     # Reset cached timestamp so we test actual NOPASSWD config, not a leftover
     # session from configure or earlier sudo use.
     sudo -k 2>/dev/null
     sudo -n true &>/dev/null && return 0
-    _NEED_BECOME_PASS=true
-    info "Sudo password needed for privilege escalation (Ansible will prompt via -K)"
     warn "To avoid prompts: add NOPASSWD to /etc/sudoers for $USER"
+    local pw
+    read -rsp "BECOME password: " pw; echo >&2
+    BECOME_PASS_FILE=$(mktemp)
+    trap 'rm -f "$BECOME_PASS_FILE"' EXIT
+    printf '%s' "$pw" > "$BECOME_PASS_FILE"
 }
 
 ensure_env_dir() {
@@ -1176,70 +1180,26 @@ run() {
     [[ -f "$pb" ]] || err "Playbook not found: $pb"
 
     local -a become_flag=()
-    [[ "$_NEED_BECOME_PASS" == "true" ]] && become_flag=(--ask-become-pass)
+    [[ -z "$BECOME_PASS_FILE" ]] || become_flag=(--become-password-file "$BECOME_PASS_FILE")
 
     local -a verbose=()
     (( _LOG_LEVEL >= 1 )) && verbose=(-vvv)
 
+    # The kubernetes role runs kubespray as a job writing to KUBESPRAY_LOG (its
+    # progress would be swallowed inside the play). Follow that file for live
+    # output; --pid ends tail if this script dies first.
+    local tail_pid=""
+    if [[ -n "${KUBESPRAY_LOG:-}" ]]; then
+        tail -n +1 -F --pid=$$ "$KUBESPRAY_LOG" 2>/dev/null &
+        tail_pid=$!
+    fi
+
+    local rc=0
     PYTHONUNBUFFERED=1 ansible-playbook -i "$INVENTORY" "$pb" "${become_flag[@]}" "${verbose[@]}" "$@" 2>&1 | tee -a "$LOG" \
-        || err "${pb_name} failed. Log: $LOG"
-}
-
-# run_kubespray: execute kubespray cluster.yml directly from bash so
-# the operator gets live streaming output. Ansible-in-ansible swallows
-# all progress, so the kubernetes role only does prep; this function
-# bridges prep → cluster.yml → post-kubespray.
-run_kubespray() {
-    local action="${1:-install}"
-    local ks_dir="${SCRIPT_DIR}/.kubespray"
-    if [[ ! -d "$ks_dir/venv" || ! -f "$ks_dir/cluster.yml" ]]; then
-        err "Kubespray not found at $ks_dir (missing venv or cluster.yml). Run 'install kubernetes' first."
-    fi
-
-    # Inventory resolution: the env inventory IS the kubespray inventory
-    # (kubespray-compatible format with kube_control_plane/kube_node/etcd groups).
-    # Fall back to the generated mycluster inventory for localhost mode.
-    local inv="$INVENTORY"
-    [[ -f "$inv" ]] || inv="${ks_dir}/inventory/mycluster/hosts.yaml"  # kubespray's own sample
-    [[ -f "$inv" ]] || { warn "Inventory not found: $inv — skipping kubespray"; return 0; }
-
-    local pb="$ks_dir/cluster.yml" extra=()
-    [[ "$action" == "teardown" ]] && { pb="$ks_dir/reset.yml"; extra=(-e reset_confirmation=yes); }
-    [[ -f "$ENV_DIR/kubespray_extra_auto.yml" ]] && extra+=(-e "@$ENV_DIR/kubespray_extra_auto.yml")
-    [[ -f "$ENV_DIR/kubespray_extra.yml" ]] && extra+=(-e "@$ENV_DIR/kubespray_extra.yml")
-
-    local -a ks_become_flag=()
-    [[ "$_NEED_BECOME_PASS" == "true" ]] && ks_become_flag=(--ask-become-pass)
-
-    local -a verbose=()
-    (( _LOG_LEVEL >= 1 )) && verbose=(-vvv)
-
-    info "Kubespray $(basename "$pb") — live output"
-    # Run in a subshell from kubespray's directory. ANSIBLE_ROLES_PATH must be
-    # unset (not empty) so ansible.cfg's roles_path takes effect. Empty string
-    # overrides the cfg with "nothing"; unset falls through to cfg.
-    # ANSIBLE_HOST_KEY_CHECKING=False disables SSH host-key verification for the
-    # cluster play — fine for localhost/lab, but revisit once real remote nodes
-    # are in the inventory.
-    (cd "$ks_dir" && \
-     unset ANSIBLE_ROLES_PATH KUBECONFIG K8S_AUTH_KUBECONFIG && \
-     ANSIBLE_CONFIG="$ks_dir/ansible.cfg" \
-     ANSIBLE_FORCE_COLOR=true \
-     ANSIBLE_HOST_KEY_CHECKING=False \
-     PATH="$ks_dir/venv/bin:$PATH" \
-        "$ks_dir/venv/bin/ansible-playbook" -i "$inv" \
-        --become --become-user=root "${ks_become_flag[@]}" "${verbose[@]}" \
-        "$pb" "${extra[@]+"${extra[@]}"}" 2>&1) | tee -a "$LOG" \
-        || err "Kubespray failed. Log: $LOG"
-
-    # Kubespray writes admin.conf to artifacts_dir (=ENV_DIR) via kubeconfig_localhost.
-    # Rename to kubeconfig.yaml so the rest of the installer finds it.
-    local _kc="${ENV_DIR}/kubeconfig.yaml"
-    if [[ -f "$ENV_DIR/admin.conf" ]]; then
-        mv "$ENV_DIR/admin.conf" "$_kc"
-        chmod 600 "$_kc"
-        ok "Kubeconfig written to ${_kc}"
-    fi
+        || rc=$?
+    # A moment for tail to print kubespray's last lines (its error, on a failure).
+    [[ -z "$tail_pid" ]] || { sleep 1; kill "$tail_pid" 2>/dev/null || true; }
+    (( rc == 0 )) || err "${pb_name} failed. Log: $LOG${KUBESPRAY_LOG:+ (kubespray: $KUBESPRAY_LOG)}"
 }
 
 # _opt_value <flag> <value> — a flag's value must exist and not be another flag,
@@ -1357,10 +1317,9 @@ _resolve_kubeconfig() {
     fi
 }
 
-# _needs_kubespray — true when this run has to drive the kubespray bash bridge.
-#
-# Kubespray cannot run inside Ansible (ansible-in-ansible swallows all progress), so bash
-# drives it: prep → cluster.yml/reset.yml → post. A BYO cluster never needs it.
+# _needs_kubespray — true when this run's plan includes kubespray (the kubernetes role
+# runs cluster.yml/reset.yml itself; see run() for its live output). A BYO cluster never
+# needs it. main uses it for teardown: the confirmation and the kubeconfig removal.
 #   install:  kubernetes is required for any target, since everything depends on
 #             infrastructure transitively — unless --only narrows away from it.
 #   teardown: the cluster is destroyed ONLY when explicitly targeted. Tearing down a
@@ -1376,8 +1335,7 @@ _needs_kubespray() {
 
 # _completion_banner — single terminal point for install/teardown/validate.
 #
-# Deliberately not in site.yaml: `run site` fires twice on a cold install and three times
-# on teardown via the kubespray bridge, so a playbook-side banner would print once per pass.
+# Deliberately not in site.yaml: the installer prints it once, after the run.
 # validate lands here too, so the wording cannot hardcode install/teardown.
 _completion_banner() {
     local headline
@@ -1426,6 +1384,7 @@ main() {
     # TARGET is empty for `status`; fall back so the filename has no
     # double dash (status--<ts>.log).
     LOG="${ENV_LOG_DIR}/${ACTION}-${TARGET:-cluster}-$(date +%Y%m%d-%H%M%S).log"
+    KUBESPRAY_LOG="${LOG%.log}.kubespray.log"
     # Keep the 30 most recent; a failed run's log is the only record of why.
     ls -1t "$ENV_LOG_DIR"/*.log 2>/dev/null | tail -n +31 | xargs -r rm -f || true
 
@@ -1438,6 +1397,8 @@ main() {
         -e "env_dir=${ENV_DIR}"
         -e "kubespray_dir=${SCRIPT_DIR}/.kubespray"
         -e "kubespray_custom_inventory=${INVENTORY}"
+        -e "kubernetes_kubespray_log=${KUBESPRAY_LOG}"
+        -e "_kubespray_become_password_file=${BECOME_PASS_FILE}"
     )
     # Solution configs, in the order the provisioning record lists them (dependencies
     # first, so a layer's own config wins over its deps'). Collected before the loop:
@@ -1461,8 +1422,8 @@ main() {
     vars+=(-e "kubernetes_kubeconfig=${KUBE_CFG}")
     [[ "$IS_BYO" == "true" ]] && vars+=(-e "existing_kubernetes=${KUBE_CFG}")
     # Export after the path is resolved so Ansible collections and kubectl
-    # both see the correct kubeconfig. Kubespray's subshell unsets these (see
-    # run_kubespray) so kubespray's own internal kubectl is unaffected.
+    # both see the correct kubeconfig. The kubespray run unsets these (see the
+    # kubernetes role, _run_kubespray.yaml) so kubespray's own kubectl is unaffected.
     export KUBECONFIG="$KUBE_CFG" K8S_AUTH_KUBECONFIG="$KUBE_CFG"
 
     # Status: reuses all the setup above, runs the status playbook, then exits.
@@ -1486,27 +1447,12 @@ main() {
         confirm "About to tear down ${_what}"
     fi
 
-    # When the kubeconfig already exists, a plain single pass is enough: the
-    # kubernetes role probes the cluster (kubectl cluster-info) and self-skips
-    # when it answers. Kubespray only runs to provision/destroy.
-    if [[ "$_includes_k8s" == "true" && "$ACTION" == "install" && ! -f "$KUBE_CFG" ]]; then
-        run site "${vars[@]}" -e "target=kubernetes" "${EXTRA_VARS[@]}"
-        run_kubespray install
-        run site "${vars[@]}" -e "_kubespray_skip_cluster_yml=true" "${EXTRA_VARS[@]}"
-    elif [[ "$_includes_k8s" == "true" && "$ACTION" == "teardown" ]]; then
-        # Tear down non-kubernetes components first (need cluster alive), then reset.
-        if [[ "$TARGET" != "kubernetes" ]]; then
-            # Merged, not replaced: this pass must still leave kubernetes for the reset.
-            run site "${vars[@]}" -e "_skip_components=kubernetes${SKIP:+,${SKIP}}" \
-                -e "component_action=teardown" "${EXTRA_VARS[@]}"
-        fi
-        run site "${vars[@]}" -e "target=kubernetes" -e "_kubespray_prep_only=true" -e "_include_deps=false" "${EXTRA_VARS[@]}"
-        run_kubespray teardown
-        run site "${vars[@]}" -e "target=kubernetes" -e "component_action=teardown" -e "_include_deps=false" "${EXTRA_VARS[@]}"
-        [[ -f "${ENV_DIR}/kubeconfig.yaml" ]] && { rm -f "${ENV_DIR}/kubeconfig.yaml"; ok "Removed kubeconfig"; }
-    else
-        # No kubespray involved — single pass
-        run site "${vars[@]}" "${EXTRA_VARS[@]}"
+    # One pass for every action: the kubernetes role runs kubespray itself, and the
+    # plan's order puts the reset after what runs on kubernetes and before what it
+    # runs on (teardown is the reverse of install).
+    run site "${vars[@]}" "${EXTRA_VARS[@]}"
+    if [[ "$_includes_k8s" == "true" && "$ACTION" == "teardown" && -f "${ENV_DIR}/kubeconfig.yaml" ]]; then
+        rm -f "${ENV_DIR}/kubeconfig.yaml"; ok "Removed kubeconfig"
     fi
 
     _completion_banner

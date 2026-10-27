@@ -11,21 +11,9 @@
   ansible.builtin.include_role:
     name: "{{ component.name }}"
 
-- name: "{{ component.name }} — {{ (_component_prep_only | default(false)) | ternary('prep complete (install continues from caller)', component_action + ' complete') }}"
+- name: "{{ component.name }} — {{ component_action }} complete"
   ansible.builtin.debug:
     msg: |-
-      {% if _component_prep_only | default(false) %}
-      ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-      ┃  ⧗ {{ component.name }} — prep complete (install continues from caller){{ ' ' * (34 - component.name | length) }}┃
-      ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-      {% else %}
       ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
       ┃  ✓ {{ component.name }} — {{ component_action }} complete{{ ' ' * (59 - component.name | length - component_action | length) }}┃
       ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-      {% endif %}
-
-- name: "Reset prep-only flag"
-  ansible.builtin.set_fact:
-    _component_prep_only: false
-  when: _component_prep_only | default(false)
-  
