@@ -6,13 +6,6 @@
 
 # ── Pre-flight: check what is already installed ───────────────────────────────
 
-- name: "observability | Check kube-prometheus-stack release"
-  kubernetes.core.helm_info:
-    name: kube-prometheus-stack
-    release_namespace: "{{ observability_namespace }}"
-  register: _obs_prom_release
-  failed_when: false
-
 - name: "observability | Check Loki release"
   kubernetes.core.helm_info:
     name: loki
@@ -132,8 +125,8 @@
 #              Node Exporter (DaemonSet), kube-state-metrics, Grafana
 # =============================================================================
 
+# Runs every time, so a changed setting (grafana.ini included) reaches the release.
 - name: "observability | Install kube-prometheus-stack"
-  when: _obs_prom_release.status is not defined or _obs_prom_release.status is none
   block:
     - name: "observability | Deploy kube-prometheus-stack"
       vars:
@@ -294,11 +287,6 @@
         - (_obs_node_exporter.resources[0].status.numberReady | default(0) | int) == (_obs_node_exporter.resources[0].status.desiredNumberScheduled | int)
       retries: 60
       delay: 5
-
-- name: "observability | kube-prometheus-stack already installed — skipping"
-  ansible.builtin.debug:
-    msg: "kube-prometheus-stack already deployed in {{ observability_namespace }} — skipping."
-  when: _obs_prom_release.status is defined and _obs_prom_release.status is not none
 
 # =============================================================================
 # 2. Loki (monolithic mode)
@@ -567,31 +555,6 @@
 # =============================================================================
 # 6. Grafana HTTPRoute (expose via Envoy Gateway)
 # =============================================================================
-
-# grafana.ini is applied on a fresh install only; after a routing_mode or
-# sign-in change Grafana keeps its old settings until the release is reinstalled.
-- name: "observability | Read Grafana's live root_url"
-  kubernetes.core.k8s_info:
-    kind: ConfigMap
-    name: kube-prometheus-stack-grafana
-    namespace: "{{ observability_namespace }}"
-  register: _obs_grafana_cm
-
-- name: "observability | Grafana settings are out of date"
-  vars:
-    _ini: "{{ (_obs_grafana_cm.resources | first | default({})).data | default({}) }}"
-  ansible.builtin.debug:
-    msg: >-
-      Grafana still runs with older settings (expected root_url {{ observability_grafana_url }}/,
-      Keycloak sign-in {{ 'on' if observability_grafana_sso | bool else 'off' }}). Reinstall it:
-      teardown observability, then install observability.
-  when:
-    - _ini['grafana.ini'] is defined
-    - (observability_grafana_url ~ '/') not in _ini['grafana.ini']
-      or (observability_grafana_sso | bool) != ('[auth.generic_oauth]' in _ini['grafana.ini'])
-      or (observability_grafana_sso | bool and 'auto_login = false' not in _ini['grafana.ini'])
-      or (observability_grafana_sso | bool and not (_ini['grafana.ini'] is search(
-            '(?m)^allowed_groups = ' ~ (observability_grafana_allowed_groups | join(',') | regex_escape) ~ '$')))
 
 - name: "observability | Publish Grafana"
   ansible.builtin.include_tasks: grafana_route.yaml

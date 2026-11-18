@@ -45,10 +45,7 @@ Signing out of Grafana ends only Grafana's session, not the Keycloak one.
 | `observability_grafana_sso` | `keycloak_enabled` | `false` removes the Keycloak button; only the local admin signs in |
 | `observability_grafana_allowed_groups` | `[]` | Keycloak groups Grafana admits; empty admits every `platform` realm user |
 
-On Kubernetes (the Helm stack) Grafana takes these settings on a fresh install
-of `observability` only, and `install` prints a notice while the running
-Grafana is out of date. Apply them with `teardown observability`, then
-`install observability`. On OpenShift every `install` applies them.
+Every `install observability` applies them.
 
 ## Without the gateway
 
