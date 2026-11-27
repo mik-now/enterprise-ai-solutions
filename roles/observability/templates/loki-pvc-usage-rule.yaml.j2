@@ -46,7 +46,7 @@ spec:
               PVC {{ '{{ $labels.namespace }}/{{ $labels.persistentvolumeclaim }}' }}
               is {{ '{{ $value | printf "%.1f" }}' }}% full.
               Increase observability_loki_storage_size (Loki WAL/index PVC) or
-              seaweedfs_volume_storage_size (chunk store) in global_config.yaml
+              seaweedfs_volume_storage_size (chunk store) in env/<name>/global_config.yaml
               and resize the existing PVC (StorageClass must have
               allowVolumeExpansion=true), or lower
               observability_loki_retention_hours.

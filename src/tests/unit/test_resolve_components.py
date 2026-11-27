@@ -198,8 +198,8 @@ def test_preflight_resolves_headlamp_through_the_role():
     assert task["ansible.builtin.include_role"]["tasks_from"] == "resolve.yaml"
 
 
-def test_template_defaults_turn_on_headlamp_and_envoy_gateway_upgrade():
+def test_defaults_turn_on_headlamp_and_envoy_gateway_upgrade():
     defaults = _yaml("configs/defaults/global_config.yaml")
     assert defaults["headlamp_enabled"] is True
-    assert defaults["envoy_gateway_upgrade"] is True
+    assert _yaml("roles/envoy_gateway/defaults/main.yaml")["envoy_gateway_upgrade"] is True
     assert "llm_services_deploy_models" not in defaults

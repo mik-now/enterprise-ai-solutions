@@ -338,7 +338,7 @@ A typical multi-node stack that Toolkit Manager installs looks like this at the 
 
 - The MetalLB IP is the control-plane node's own IP here (see [IP Allocation Strategy](#ip-allocation-strategy)).
 - The Envoy proxy runs on the control-plane node. Platform pods prefer it and model pods prefer the workers ([Node Topology](../configuration/node-topology.md)).
-- The pod and Service ranges are the defaults, `kubernetes_cluster_cidr` and `kubernetes_service_cidr`. Change them in `global_config.yaml` if they overlap your network.
+- The pod and Service ranges are the defaults, `kubernetes_cluster_cidr` and `kubernetes_service_cidr`. If they overlap your network, set them in `global_config.yaml` before the first install (they go to Kubespray as `kube_service_addresses` and `kube_pods_subnet`).
 
 ### Traffic Flow Detail
 
@@ -472,7 +472,7 @@ The networking defaults Toolkit Manager applies already keep network overhead sm
 
 
 - **A node IP as the MetalLB IP where it is safe** (a single node, or one control-plane node with nftables or iptables), so no extra router hop. See [IP Allocation Strategy](#ip-allocation-strategy).
-- **kube-proxy in nftables mode** (the default, `kubernetes_kube_proxy_mode: nftables`): fast rule matching, and unlike IPVS it never binds LoadBalancer IPs to the nodes.
+- **kube-proxy in nftables mode** (the default): fast rule matching, and unlike IPVS it never binds LoadBalancer IPs to the nodes.
 - **NAT on a dedicated firewall or router** rather than on a cluster node.
 
 ### BGP Mode (Advanced)

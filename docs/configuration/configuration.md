@@ -124,18 +124,18 @@ why the template leaves `auth_type` commented out.
 ## Full template
 
 `init` copies [`configs/defaults/global_config.yaml`](../../configs/defaults/global_config.yaml)
-to `env/<name>/global_config.yaml`. Its active lines are the defaults; its `# key: value`
-lines are optional settings (remove the `# ` to use one). It has eight sections:
+to `env/<name>/global_config.yaml`. Values there override `env/<name>/config.<layer>.yaml`.
+It has eight sections:
 
 | Section | What it sets |
 |---|---|
-| 1. Kubernetes | cluster name, kube-proxy mode, `existing_kubernetes` (your own cluster) |
-| 2. Networking and proxy | service and pod CIDRs, `metallb_ip_range`, `http_proxy` / `https_proxy` / `no_proxy` |
-| 3. Domain and access | `base_domain_name`, `routing_mode`, `gateway_landing_path`, TLS (`gateway_tls_mode`, custom certificate files), `gateway_request_timeout` |
+| 1. Kubernetes | `existing_kubernetes` (your own cluster) |
+| 2. Networking and proxy | `metallb_ip_range`, `http_proxy` / `https_proxy` / `no_proxy` |
+| 3. Domain and access | `base_domain_name`, `routing_mode`, TLS (`gateway_tls_mode`, custom certificate files) |
 | 4. Components | `istio_enabled`, `observability_enabled` (and Prometheus retention and size), `metrics_server_enabled`, `headlamp_enabled` (on), `keda_enabled`, `velero_enabled`, `kata_containers_enabled`, `kata_runtime` |
-| 5. Storage | `storage_backend` and its `custom` settings, `object_store_backend`, `seaweedfs_volume_storage_size` |
-| 6. Sign-in | `auth_type` (API auth: `jwt` by default, `litellm_vkey` with the Agent Toolkit; set here only to force it for every layer), platform-admin MFA, `headlamp_byo_apiserver_trusted` |
-| 7. Advanced | `node_topology_enabled`, `enforce_pss`, CPU policy, `kubernetes_accelerator`, `rack_scale_enabled`, `envoy_gateway_upgrade` (on: Envoy Gateway 1.9.3) |
+| 5. Storage | `storage_backend` and its `custom` settings |
+| 6. Sign-in | `auth_type` (API auth: `jwt` or `litellm_vkey`; set here only to force it for every layer), platform-admin MFA, `headlamp_byo_apiserver_trusted` |
+| 7. Advanced | `node_topology_enabled`, `enforce_pss`, CPU policy, `kubernetes_accelerator`, `rack_scale_enabled` |
 | 8. Hardware and platform specific | Ceph devices, NetApp ONTAP, OpenShift checks |
 
 Keycloak and the gateway always install; section 4 switches the rest on or off. LiteLLM and
@@ -148,20 +148,14 @@ is left as it is (or commented out).
 
 | Field | What it controls |
 |---|---|
-| `kubernetes_cluster_name` | The cluster's internal DNS suffix. Default `cluster.local` |
-| `kubernetes_kube_proxy_mode` | How Kubernetes routes service traffic: `nftables` (default), `iptables` or `ipvs` |
 | `existing_kubernetes` | Path to the kubeconfig of a cluster you already run; the installer then skips building one. Unset by default. `KUBECONFIG` is not supported: the installer uses this path, or `env/<name>/kubeconfig.yaml` for a managed cluster — see [BYO cluster](#byo-cluster) |
-| `kubernetes_service_cidr` | Address range for Kubernetes services. Default `10.233.0.0/18` |
-| `kubernetes_cluster_cidr` | Address range for pods. Default `10.233.64.0/18` |
 | `metallb_ip_range` | Range of IPs (`a-b`) MetalLB hands out to load balancers. Leave unset to have one detected |
 | `http_proxy`, `https_proxy`, `no_proxy` | Corporate proxy. Unset by default — see [Proxy](#proxy) |
 | `base_domain_name` | All service URLs derive from this (e.g. `grafana.<domain>`, `litellm.<domain>`). Default `inteltoolkits.ai` |
 | `routing_mode` | `subdomain` (default: one host name per service) or `path` (one host name, services under paths) — see [Networking](#networking) |
-| `gateway_landing_path` | Path mode only: where the bare domain sends you, for example `/grafana/`. Default: Headlamp, when it is on |
 | `gateway_tls_mode` | How TLS certs are provisioned: `selfsigned` (default, an auto-generated CA) or `custom` (bring your own) — see [TLS](#tls) |
 | `gateway_tls_cert_file`, `gateway_tls_key_file` | `custom` only: your certificate and key |
 | `gateway_tls_ca_file` | `custom` only, optional: the private CA that signed your certificate |
-| `gateway_request_timeout` | Max time the gateway waits for a model response before timing out. Default `600s` (Envoy's own 15 s is too short for model responses) |
 | `istio_enabled` | Istio ambient service mesh: encrypted (mTLS) traffic between services. Default `true` |
 | `observability_enabled` | Whether the full monitoring stack (Prometheus/Grafana/Loki/Tempo) is deployed. Default `true` |
 | `observability_prometheus_retention`, `observability_prometheus_storage_size` | How long Prometheus keeps metrics (default `30d`) and its disk size (default `50Gi`) |
@@ -169,12 +163,10 @@ is left as it is (or commented out).
 | `headlamp_enabled` | Headlamp, the Kubernetes web UI, with Keycloak sign-in. Default `true`. Skipped on OpenShift, and on a BYO cluster in `apiserver` mode until `headlamp_byo_apiserver_trusted: true`. In path mode the bare domain redirects to it — see [Headlamp](headlamp.md) |
 | `keda_enabled` | KEDA event-driven autoscaling (on OpenShift: the Custom Metrics Autoscaler). Default `false` |
 | `velero_enabled` | Whether the backup mechanism (Velero) is deployed. Default `false`; needs snapshot-capable storage (`nfs` or `ceph`) |
-| `kata_containers_enabled`, `kata_runtime` | Kata Containers microVM runtime for the Agent Toolkit sandbox. Default `false`; runtime `kata-fc` (Firecracker, default), `kata-qemu` or `both` — see [Kata Containers](#kata-containers) |
+| `kata_containers_enabled`, `kata_runtime` | Kata Containers microVM runtime for sandboxed pods. Default `false`; runtime `kata-fc` (Firecracker, default), `kata-qemu` or `both` — see [Kata Containers](#kata-containers) |
 | `storage_backend` | Where persistent data lives: `local-path` (default), `nfs`, `ceph`, `netapp-trident` or `custom`. Must be shared storage for multi-node — see [Storage](#storage) |
 | `storage_custom_storageclass`, `storage_custom_rwx` | `custom` only: the StorageClass to use (required), and `false` for a class several nodes cannot share (default `true`) |
-| `object_store_backend` | S3 store for Loki, Tempo and Langfuse data: `seaweedfs` (default) or `external` — see [Object store](#object-store) |
-| `seaweedfs_volume_storage_size` | Size of the SeaweedFS data volume. Default `10Gi`; fixed after the first install |
-| `auth_type` | API authentication: `jwt` (default; Agent Toolkit: `litellm_vkey`). Leave it commented here: a value in this file overrides every layer's choice — see [API authentication](#api-authentication) |
+| `auth_type` | API authentication: `jwt` (default) or `litellm_vkey`. Leave it commented here: a value in this file overrides every layer's choice — see [API authentication](#api-authentication) |
 | `keycloak_platform_bootstrap_admin_mfa` | `true`: the platform admin must set up a one-time-password app at first sign-in. Default `false` |
 | `headlamp_byo_apiserver_trusted` | Your own cluster's API server already trusts the platform realm. Default `false` — see [Headlamp](headlamp.md) |
 | `node_topology_enabled` | Prefer control-plane nodes for platform pods and worker nodes for models (a preference, not a rule). Default `true` — see [Node Topology](node-topology.md) |
@@ -182,10 +174,22 @@ is left as it is (or commented out).
 | `kubernetes_cpu_policy` | CPU pinning strategy for inference workloads. Default `nri-balloons` — see [CPU policy](#cpu-policy) |
 | `kubernetes_accelerator` | Compute target for inference workloads. Default `cpu` (Intel® Xeon®: tune the kubelet's CPU/NUMA settings); CPU pinning is turned off for any other value |
 | `rack_scale_enabled` | Rack-scale fabric; needs `env/<name>/rack-profile.yaml`. Default `false` — see [Rack-scale deployment](../deployment/rack-scale.md) |
-| `envoy_gateway_upgrade` | `true` (default): install Envoy Gateway 1.9.3 instead of 1.7.5 (and upgrade an older one in place); the inference layer then installs KServe 0.21. `false`: 1.7.5. Never downgrades |
 | `rook_ceph_devices`, `rook_ceph_teardown_wipe_devices` | `storage_backend: ceph` only — see [Storage](#storage) |
 | `ontap_*`, `gateway_s3_subdomain` | `storage_backend: netapp-trident` only — see [NetApp ONTAP and Trident](../deployment/netapp-ontap.md) |
 | `cluster_distribution`, `openshift_prereq_*` | OpenShift only — see [Deploy on OpenShift](../deployment/openshift.md) |
+
+### Settings not in the template
+
+Add a line to `env/<name>/global_config.yaml` to change one.
+
+| Field | What it controls |
+|---|---|
+| `kubernetes_service_cidr`, `kubernetes_cluster_cidr` | Service (default `10.233.0.0/18`) and pod (default `10.233.64.0/18`) ranges, passed to Kubespray as `kube_service_addresses` and `kube_pods_subnet`. Set them before the first install. Behind a proxy, `no_proxy` must list both — see [Proxy](#proxy) |
+| `gateway_landing_path` | Path mode only: where the bare domain sends you, for example `/grafana/`. Default: Headlamp, when it is on |
+| `gateway_request_timeout` | Max time the gateway waits for a model response. Default `600s` (Envoy's own 15 s is too short for model responses) |
+| `object_store_backend` | S3 store for Loki, Tempo and Langfuse data: `seaweedfs` (default) or `external` — see [Object store](#object-store) |
+| `seaweedfs_volume_storage_size` | Size of the SeaweedFS data volume. Default `10Gi`; fixed after the first install |
+| `envoy_gateway_upgrade` | `true` (default): install Envoy Gateway 1.9.3 instead of 1.7.5 (and upgrade an older one in place); the inference layer then installs KServe 0.21. `false`: 1.7.5. Never downgrades |
 
 ---
 
@@ -388,8 +392,6 @@ Run `./toolkit_manager.sh show` to see every component.
 | Setting | Default | What it does |
 |---|---|---|
 | `gateway_request_timeout` | `600s` | How long Envoy waits for an answer — raised from its 15 s default for long model responses |
-| `kubernetes_cluster_name` | `cluster.local` | The cluster's DNS suffix |
-| `kubernetes_kube_proxy_mode` | `nftables` | `nftables`, `iptables` or `ipvs` |
 | `node_topology_enabled` | `true` | Platform pods prefer control-plane nodes, model pods prefer workers. See [Node Topology](node-topology.md) |
 | `routing_mode` | `subdomain` | How services are published on the domain: `subdomain` or `path` (see below) |
 
@@ -555,7 +557,7 @@ Each component's version is pinned in its defaults file, `roles/<component>/defa
 versions, so normally you change versions by moving to a newer Toolkit Manager release, not by
 editing them.
 
-The one version switch in `global_config.yaml` is `envoy_gateway_upgrade`: `true` moves Envoy
+The one version switch is `envoy_gateway_upgrade` (set it in `global_config.yaml`): `true` moves Envoy
 Gateway from 1.7.5 to 1.9.3 (and the matching Gateway API and KServe release lines), and never
 downgrades.
 

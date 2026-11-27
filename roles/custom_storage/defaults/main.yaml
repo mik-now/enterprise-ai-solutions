@@ -9,9 +9,5 @@
 #
 # The class is only read, never patched: it predates this install and is shared
 # with workloads outside the platform.
+# storage_custom_storageclass and storage_custom_rwx default in roles/storage.
 # =============================================================================
-
-# Declared here so the role is standalone-runnable (-e target=storage); the real
-# values come from global_config.yaml via roles/storage/defaults/main.yaml.
-storage_custom_storageclass: ""
-storage_custom_rwx: true

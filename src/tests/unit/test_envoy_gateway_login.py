@@ -150,6 +150,7 @@ def test_patch_policy_on_after_our_install_or_when_the_controller_has_it(action,
 
 def test_notice_names_the_fix_that_works():
     v, notice = detect_vars("1.7.5")
+    v["envoy_gateway_upgrade"] = False
     assert value(notice["show"], v)
     assert "envoy_gateway_upgrade: true upgrades it to 1.9.3" in render(notice["msg"], v)
     v, notice = detect_vars("1.9.3")

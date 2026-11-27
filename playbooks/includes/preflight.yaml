@@ -266,10 +266,10 @@
 - name: "Preflight - Object store: validate backend value"
   ansible.builtin.assert:
     that:
-      - (object_store_backend | default('seaweedfs')) in ['seaweedfs', 'rustfs', 'external']
+      - (object_store_backend | default('seaweedfs')) in ['seaweedfs', 'external']
     fail_msg: >-
       Invalid object_store_backend='{{ object_store_backend | default('') }}'.
-      Must be one of: seaweedfs (default), rustfs or external.
+      Must be one of: seaweedfs (default) or external.
     quiet: true
 
 # ── CPU Policy Resolution ─────────────────────────────────────────────────────
